@@ -40,6 +40,15 @@ class ContourNet(nn.Module):
             cfg.MODEL.PIXEL_STD).view(-1, 1, 1))
 
         self.combine_on = cfg.MODEL.CONTOUR_NET.COMBINE.ENABLED
+        self.loss_combination = cfg.MODEL.CONTOUR_NET.LOSS_COMBINATION
+        if self.loss_combination == 'uncertainty':
+            self.sigma = nn.Parameter(torch.ones(3))
+        else:
+            loss_weights = []
+            loss_weights.append(cfg.MODEL.CENTER_REG_HEAD.LOSS_WEIGHT)
+            loss_weights.append(cfg.MODEL.HED_HEAD.LOSS_WEIGHT)
+            loss_weights.append(cfg.MODEL.HED_HEAD.LOSS_WEIGHT)
+            self.sigma = torch.tensor(loss_weights)
         self.combine_overlap_threshold = \
             cfg.MODEL.CONTOUR_NET.COMBINE.OVERLAP_THRESH
         self.combine_stuff_area_limit = \
@@ -47,7 +56,6 @@ class ContourNet(nn.Module):
         self.combine_instances_confidence_threshold = \
             cfg.MODEL.CONTOUR_NET.COMBINE.INSTANCES_CONFIDENCE_THRESH
         self.contour_classes = cfg.MODEL.HED_HEAD.NUM_CLASSES
-        self.sigma = nn.Parameter(torch.ones(3))
 
     @property
     def device(self):
@@ -101,22 +109,28 @@ class ContourNet(nn.Module):
             losses = {}
             losses.update(sem_seg_losses)
             losses.update(contour_losses)
-            # loss = 0.0
-            # self.sigma = self.sigma.cuda()
-            # for i, k in enumerate(losses.keys()):
-            #     loss_k = losses[k].cuda()
-            #     if k in ['loss_sem_seg', 'loss_hed_bce']:
-            #         loss += (torch.exp(-self.sigma[i])
-            #                  * loss_k + 0.5*self.sigma[i])
-            #     elif k in ['loss_hed_huber']:
-            #         loss += 0.5 * \
-            #             (torch.exp(-self.sigma[i]) * loss_k + self.sigma[i])
-            #     else:
-            #         raise ValueError('Unkown loss term {}'.format(k))
-            # losses.update({'total_loss': loss})
-            # losses.update({'weight_sem_seg': self.sigma[0],
-            #                'weight_hed_huber': self.sigma[1],
-            #                'weight_hed_bce': self.sigma[2]})
+            loss = 0.0
+            if self.loss_combination == 'uncertainty':
+                self.sigma = self.sigma.cuda()
+                for i, k in enumerate(losses.keys()):
+                    loss_k = losses[k].cuda()
+                    if k in ['loss_sem_seg', 'loss_hed_bce']:
+                        loss += (torch.exp(-self.sigma[i])
+                                 * loss_k + 0.5*self.sigma[i])
+                    elif k in ['loss_hed_huber']:
+                        loss += 0.5 * \
+                            (torch.exp(-self.sigma[i])
+                             * loss_k + self.sigma[i])
+                    else:
+                        raise ValueError('Unkown loss term {}'.format(k))
+            else:
+                for k, v in losses.items():
+                    loss += v
+
+            losses.update({'total_loss': loss})
+            losses.update({'weight_sem_seg': self.sigma[0],
+                           'weight_hed_huber': self.sigma[1],
+                           'weight_hed_bce': self.sigma[2]})
             return losses
 
         processed_results = []
