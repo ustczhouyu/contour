@@ -204,7 +204,7 @@ class HEDHead(nn.Module):
                 out_dims = num_classes
                 if self.res5_supervision:
                     activation = None
-                    norm_module = get_norm(norm, out_dims)
+                    norm_module = get_norm("", out_dims)
 
             # if in_feature == self.in_features[0]:
             block_stride = 2**max(1, int(np.log2(feature_strides[in_feature])))
@@ -278,7 +278,8 @@ class HEDHead(nn.Module):
         if self.res5_supervision:
             loss_fused = loss_fn(fused, targets.squeeze())
             loss_res5 = loss_fn(res5, targets.squeeze())
-            loss = {k: loss_fused[k] + loss_res5[k] for k in loss_fused.keys()}
+            loss = {k: 0.5*loss_fused[k] + 0.5*loss_res5[k]
+                    for k in loss_fused.keys()}
             # print('loss_fused:', loss_fused)
             # print('loss_res5:', loss_res5)
             # print('total_loss:', loss)
