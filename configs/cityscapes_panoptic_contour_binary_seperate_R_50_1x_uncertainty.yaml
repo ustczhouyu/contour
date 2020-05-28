@@ -1,0 +1,8 @@
+_BASE_: "Base-Panoptic-Contour.yaml"
+MODEL:
+  WEIGHTS: "detectron2://ImageNetPretrained/MSRA/R-50.pkl"
+  RESNETS:
+    DEPTH: 50
+  CONTOUR_NET:
+    LOSS_COMBINATION: "uncertainty"
+OUTPUT_DIR: "output/cityscapes_panoptic_contour_binary_seperate_R_50_1x_uncertainty"
