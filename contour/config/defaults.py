@@ -51,7 +51,7 @@ _C.MODEL.HED_HEAD.IN_FEATURES = ["res2", "res3", "res4", "res5"]
 _C.MODEL.HED_HEAD.LOSS_WEIGHT = 1.0
 _C.MODEL.HED_HEAD.NUM_CLASSES = 1  # 9  # (8 Stuff + 1 background)
 _C.MODEL.HED_HEAD.HUBER_ACTIVE = True
-_C.MODEL.HED_HEAD.NORM = "BN"
+_C.MODEL.HED_HEAD.NORM = "GN"
 _C.MODEL.HED_HEAD.RES5_SUPERVISION = False
 
 # ---------------------------------------------------------------------------- #
