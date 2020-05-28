@@ -1,0 +1,29 @@
+MODEL:
+  META_ARCHITECTURE: "ContourNet"
+  MASK_ON: True
+  BACKBONE:
+    NAME: "build_resnet_backbone"
+  RESNETS:
+    OUT_FEATURES: ["res2", "res3", "res4", "res5"]
+  FPN:
+    IN_FEATURES: ["res2", "res3", "res4", "res5"]
+  SEM_SEG_HEAD:
+    LOSS_WEIGHT: 1.0
+  HED_HEAD:
+    LOSS_WEIGHT: 1.0
+DATASETS:
+  TRAIN: ("cityscapes_fine_panoptic_seg_train",)
+  TEST: ("cityscapes_fine_panoptic_seg_val",)
+INPUT:
+  MIN_SIZE_TRAIN: (800, 832, 864, 896, 928, 960, 992, 1024)
+  MIN_SIZE_TRAIN_SAMPLING: "choice"
+  MIN_SIZE_TEST: 1024
+  MAX_SIZE_TRAIN: 2048
+  MAX_SIZE_TEST: 2048
+SOLVER:
+  BASE_LR: 0.01
+  STEPS: (20000, 26000)
+  MAX_ITER: 32000
+  IMS_PER_BATCH: 4
+TEST:
+  EVAL_PERIOD: 8000
