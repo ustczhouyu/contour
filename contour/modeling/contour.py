@@ -110,8 +110,8 @@ class ContourNet(nn.Module):
             losses.update(sem_seg_losses)
             losses.update(contour_losses)
             loss = 0.0
+            self.sigma = self.sigma.cuda()
             if self.loss_combination == 'uncertainty':
-                self.sigma = self.sigma.cuda()
                 for i, k in enumerate(losses.keys()):
                     loss_k = losses[k].cuda()
                     if k in ['loss_sem_seg', 'loss_hed_bce']:
@@ -125,7 +125,7 @@ class ContourNet(nn.Module):
                         raise ValueError('Unkown loss term {}'.format(k))
             else:
                 for k, v in losses.items():
-                    loss += v
+                    loss += v.cuda()
 
             losses.update({'total_loss': loss})
             losses.update({'weight_sem_seg': self.sigma[0],
