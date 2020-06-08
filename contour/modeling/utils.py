@@ -1,6 +1,6 @@
 from typing import Dict
 import math
-
+import copy
 import fvcore.nn.weight_init as weight_init
 import numpy as np
 import cv2
@@ -19,12 +19,14 @@ from detectron2.modeling import Backbone
 from ..layers.losses import HuberLoss, WeightedBinaryCrossEntropy, \
     WeightedMultiClassBinaryCrossEntropy
 from .visualization import rgb_from_gt_contours, rgb_from_pred_contours
-# import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt
+from .postprocessing import to_rgb
 
 
 __all__ = ["FPNBLOCK", "build_fpn_BLOCK", "HEDHead", "build_hed_head",
-           "SemSegHead", "build_sem_seg_head",
-           "CenterRegHead", "build_center_reg_head"]
+           "SemSegHead", "build_sem_seg_head", 'build_contour_head',
+           "CenterRegHead", "build_center_reg_head", "ContourHead",
+           "build_semantic_instance_head", "SemanticInstanceHead"]
 
 
 FPN_BLOCKS_REGISTRY = Registry("FPN_BLOCKS")
@@ -42,6 +44,15 @@ SEM_SEG_HEAD_REGISTRY.__doc__ = """ Registry for SEM_SEG_HEAD, which
 CENTER_REG_HEAD_REGISTRY = Registry("CENTER_REG_HEAD")
 CENTER_REG_HEAD_REGISTRY.__doc__ = """ Registry for CENTER_REG_HEAD,
  which make center regression from FPN feature map. """
+
+CONTOUR_HEAD_REGISTRY = Registry("CONTOUR_HEAD")
+CONTOUR_HEAD_REGISTRY.__doc__ = """ Registry for CONTOUR_HEAD,
+ which predict contours from FPN feature map. """
+
+SEMANTIC_INSTANCE_HEAD_REGISTRY = Registry("SEMANTIC_INSTANCE_HEAD")
+SEMANTIC_INSTANCE_HEAD_REGISTRY.__doc__ = """ Registry for
+ SEMANTIC_INSTANCE_HEAD, which predicts contours and sem_seg from
+ FPN feature map. """
 
 
 def build_fpn(cfg, input_shape: ShapeSpec):
@@ -91,6 +102,15 @@ def build_sem_seg_head(cfg, input_shape):
     return SEM_SEG_HEAD_REGISTRY.get(name)(cfg, input_shape)
 
 
+def build_semantic_instance_head(cfg, input_shape):
+    """
+    Build a joint semantic segmentation and contour predictior from
+     `cfg.MODEL.SEMANTIC_INSTANCE_HEAD.NAME`.
+    """
+    name = cfg.MODEL.SEMANTIC_INSTANCE_HEAD.NAME
+    return SEMANTIC_INSTANCE_HEAD_REGISTRY.get(name)(cfg, input_shape)
+
+
 def build_center_reg_head(cfg, input_shape):
     """
     Build an center regression predictior from
@@ -98,6 +118,15 @@ def build_center_reg_head(cfg, input_shape):
     """
     name = cfg.MODEL.CENTER_REG_HEAD.NAME
     return CENTER_REG_HEAD_REGISTRY.get(name)(cfg, input_shape)
+
+
+def build_contour_head(cfg, input_shape):
+    """
+    Build an center regression predictior from
+     `cfg.MODEL.CONTOUR_HEAD.NAME`.
+    """
+    name = cfg.MODEL.CONTOUR_HEAD.NAME
+    return CONTOUR_HEAD_REGISTRY.get(name)(cfg, input_shape)
 
 
 @FPN_BLOCKS_REGISTRY.register()
@@ -194,6 +223,7 @@ class HEDHead(nn.Module):
         num_classes = cfg.MODEL.HED_HEAD.NUM_CLASSES
         self.num_classes = num_classes
         self.huber_active = cfg.MODEL.HED_HEAD.HUBER_ACTIVE
+        self.dice_active = cfg.MODEL.HED_HEAD.DICE_ACTIVE
         self.res5_supervision = cfg.MODEL.HED_HEAD.RES5_SUPERVISION
         self.scale_blocks = []
         for in_feature in self.in_features:
@@ -247,7 +277,7 @@ class HEDHead(nn.Module):
         """
         fused, res5 = self.layers(features)
         if self.training:
-            return None, self.losses(fused, res5, targets)
+            return fused, self.losses(fused, res5, targets)
         else:
             return fused, {}
 
@@ -259,6 +289,12 @@ class HEDHead(nn.Module):
                 res5 = x[i]
         x = self.shared_concat(x, self.num_classes)
         x = self.predictor(x)
+        # print(torch.unique(torch.sigmoid(x[0])))
+        # axis = plt.subplots(1, 2)[-1]
+        # axis[0].imshow(rgb_from_pred_contours(x[0].squeeze().cpu().numpy()))
+        # axis[1].imshow(rgb_from_pred_contours(
+        #     x[0].squeeze().cpu().numpy(), thinned=True))
+        # plt.show()
         if self.res5_supervision:
             return x, res5
         else:
@@ -272,9 +308,11 @@ class HEDHead(nn.Module):
                 res5 = F.interpolate(res5, size=targets.size()[-2:],
                                      mode="bilinear", align_corners=True)
         if self.num_classes == 1:
-            loss_fn = WeightedBinaryCrossEntropy(self.huber_active)
+            loss_fn = WeightedBinaryCrossEntropy(self.huber_active,
+                                                 self.dice_active)
         else:
-            loss_fn = WeightedMultiClassBinaryCrossEntropy(self.huber_active)
+            loss_fn = WeightedMultiClassBinaryCrossEntropy(self.huber_active,
+                                                           self.dice_active)
         if self.res5_supervision:
             loss_fused = loss_fn(fused, targets.squeeze())
             loss_res5 = loss_fn(res5, targets.squeeze())
@@ -327,7 +365,6 @@ class SemSegHead(nn.Module):
         feature_channels = input_shape.channels
         self.loss_weight = cfg.MODEL.SEM_SEG_HEAD.LOSS_WEIGHT
         self.ignore_value = cfg.MODEL.SEM_SEG_HEAD.IGNORE_VALUE
-        self.stride = input_shape.stride
         self.predictor = Conv2d(feature_channels, num_classes,
                                 kernel_size=1, stride=1, padding=0)
         weight_init.c2_msra_fill(self.predictor)
@@ -340,7 +377,7 @@ class SemSegHead(nn.Module):
         """
         x = self.predictor(features)
         if self.training:
-            return None, self.losses(x, targets)
+            return x, self.losses(x, targets)
         else:
             return x, {}
 
@@ -350,6 +387,99 @@ class SemSegHead(nn.Module):
         loss = F.cross_entropy(x, targets, reduction="mean",
                                ignore_index=self.ignore_value)
         losses = {"loss_sem_seg": loss * self.loss_weight}
+        return losses
+
+
+@SEMANTIC_INSTANCE_HEAD_REGISTRY.register()
+class SemanticInstanceHead(nn.Module):
+    """
+    A joint semantic segmentation and contour predictior that takes FPN
+     feature map as input.
+    """
+
+    def __init__(self, cfg, input_shape: Dict[str, ShapeSpec]):
+        super().__init__()
+        num_classes = cfg.MODEL.SEMANTIC_INSTANCE_HEAD.NUM_CLASSES
+        feature_channels = input_shape.channels
+        self.huber_active = cfg.MODEL.SEMANTIC_INSTANCE_HEAD.HUBER_ACTIVE
+        self.dice_active = cfg.MODEL.SEMANTIC_INSTANCE_HEAD.DICE_ACTIVE
+        self.loss_weight = cfg.MODEL.SEMANTIC_INSTANCE_HEAD.LOSS_WEIGHT
+        self.ignore_value = cfg.MODEL.SEMANTIC_INSTANCE_HEAD.IGNORE_VALUE
+        self.dual_loss = cfg.MODEL.SEMANTIC_INSTANCE_HEAD.DUAL_LOSS
+        if self.dual_loss:
+            self.dual_loss_weight = \
+                cfg.MODEL.SEMANTIC_INSTANCE_HEAD.DUAL_LOSS_WEIGHT
+        self.predictor = Conv2d(feature_channels, num_classes,
+                                kernel_size=1, stride=1, padding=0)
+        weight_init.c2_msra_fill(self.predictor)
+
+    def forward(self, features, seg_targets, contour_targets):
+        """
+        Returns:
+            In training, returns (None, dict of losses)
+            In inference, returns (CxHxW logits, {})
+        """
+        x = self.predictor(features)
+        if self.training:
+            return x, self.losses(x, seg_targets, contour_targets)
+        else:
+            return x, {}
+
+    def losses(self, predictions, seg_targets, contour_targets):
+        x = F.interpolate(predictions, size=seg_targets.size()[-2:],
+                          mode="bilinear", align_corners=True)
+        combined_targets = combine_seg_contour_targets(
+            seg_targets, contour_targets)
+        seg_loss = F.cross_entropy(x, combined_targets, reduction="mean",
+                                   ignore_index=self.ignore_value)
+        losses = {"loss_sem_seg": seg_loss * self.loss_weight}
+
+        if self.dual_loss:
+            contour_preds = x[:, 19:, ...]
+            loss_fn = WeightedMultiClassBinaryCrossEntropy(self.huber_active,
+                                                           self.dice_active)
+            contour_loss = loss_fn(contour_preds, contour_targets)
+            losses.update({k: v * self.loss_weight
+                            for k, v in contour_loss.items()})
+        return losses
+
+
+@CONTOUR_HEAD_REGISTRY.register()
+class ContourHead(nn.Module):
+    """
+    Contour predictor that takes FPN feature map as input and
+     outputs Instance seperating contours.
+    """
+
+    def __init__(self, cfg, input_shape: Dict[str, ShapeSpec]):
+        super().__init__()
+        num_classes = cfg.MODEL.CONTOUR_HEAD.NUM_CLASSES
+        feature_channels = input_shape.channels
+        self.huber_active = cfg.MODEL.CONTOUR_HEAD.HUBER_ACTIVE
+        self.dice_active = cfg.MODEL.CONTOUR_HEAD.DICE_ACTIVE
+        self.loss_weight = cfg.MODEL.CONTOUR_HEAD.LOSS_WEIGHT
+        self.predictor = Conv2d(feature_channels, num_classes,
+                                kernel_size=1, stride=1, padding=0)
+        weight_init.c2_msra_fill(self.predictor)
+
+    def forward(self, features, targets=None):
+        """
+        Returns:
+            In training, returns (None, dict of losses)
+            In inference, returns (CxHxW logits, {})
+        """
+        x = self.predictor(features)
+        if self.training:
+            return x, self.losses(x, targets)
+        else:
+            return x, {}
+
+    def losses(self, predictions, targets):
+        x = F.interpolate(predictions, size=targets.size()[-2:],
+                          mode="bilinear", align_corners=True)
+        loss = WeightedMultiClassBinaryCrossEntropy(self.huber_active,
+                                                    self.dice_active)(x, targets)
+        losses = {k: v * self.loss_weight for k, v in loss.items()}
         return losses
 
 
@@ -408,7 +538,7 @@ class CenterRegHead(nn.Module):
 
         x = self.layers(features)
         if self.training:
-            return None, self.losses(x, targets)
+            return x, self.losses(x, targets)
         else:
             return x, {}
 
@@ -581,16 +711,15 @@ def _assert_strides_are_log2_contiguous(strides):
 
 
 def get_gt_contours(targets, image_sizes, num_classes):
-    height, width = max(image_sizes)
     batch_size = len(targets)
-    contours = torch.zeros(batch_size, num_classes, height, width)
-    for i in range(batch_size):
-        target_im = targets[i]
-        contour_im = np.zeros((num_classes, height, width),
+    contours = []
+    for target_im, size in zip(targets, image_sizes):
+        contour_im = np.zeros((num_classes, size[0], size[1]),
                               dtype=np.uint8).squeeze()
+        img = np.zeros((size[0], size[1]))
         # no gt
         if not target_im.has('gt_masks'):
-            contours[i] = torch.from_numpy(contour_im)
+            contours.append(torch.from_numpy(contour_im))
             continue
 
         bboxes = target_im.gt_boxes.tensor
@@ -598,18 +727,47 @@ def get_gt_contours(targets, image_sizes, num_classes):
         masks = target_im.gt_masks
 
         for mask, bbox, label in zip(masks, bboxes, labels):
-            x1, y1, x2, y2 = bbox.cpu().numpy().astype(np.uint16)
+            bbox = bbox.cpu().numpy().astype(np.uint16)
+            x1, y1, x2, y2 = bbox
+            h, w = y2 - y1, x2 - x1
+            merged_cnts = []
+            # polygon = copy.deepcopy(polygon)
+            # for p in polygon:
+            #     p[0::2] = p[0::2] - bbox[0]
+            #     p[1::2] = p[1::2] - bbox[1]
+            # bit_mask = polygons_to_bitmask(polygon, h, w)
+            # bit_mask = bit_mask.astype(np.uint8)
             bit_mask = mask.cpu().numpy().astype(np.uint8)[y1:y2, x1:x2]
-            img = np.zeros_like(bit_mask)
             cnts, _ = cv2.findContours(bit_mask, cv2.RETR_TREE,
                                        cv2.CHAIN_APPROX_SIMPLE)
+            if len(cnts) == 0:
+                continue
+            # elif len(cnts) == 1:
+            #     merged_cnts = cnts
+            # else:
+            #     for cnt in cnts:
+            #         merged_cnts.extend(cnt) 
+            #     merged_cnts = [np.array(merged_cnts)]
+            #     merged_cnts = np.sort(merged_cnts, axis=0)[::-1]
             if num_classes == 1:
                 contour_im[y1:y2, x1:x2] = cv2.drawContours(
-                    img, cnts, -1, 1, 2)
+                    img[y1:y2, x1:x2], cnts, -1, 1, 2)
             else:
                 contour_im[label, y1:y2, x1:x2] = cv2.drawContours(
-                    img, cnts, -1, 1, 2)
-        # plt.imshow(contour_im)
-        # plt.show()
-        contours[i] = torch.from_numpy(contour_im)
-    return contours.cuda()
+                    img[y1:y2, x1:x2], cnts, -1, 1, 2)
+        contours.append(torch.from_numpy(contour_im).float())
+    return contours
+
+
+def combine_seg_contour_targets(gt_seg, gt_contours):
+    if len(gt_contours.shape) < 4:
+            gt_contours = gt_contours.unsqueeze(1)
+    num_instance_classes = gt_contours.size()[1]
+    combined_targets = gt_seg.clone()
+    for i in range(num_instance_classes):
+        gt_contours_ = gt_contours[:, i, ...].squeeze()
+        idx = (gt_contours_ == 1)
+        combined_targets[idx] = 19 + i
+    # plt.imshow(to_rgb(combined_targets[0].cpu().numpy()))
+    # plt.show()
+    return combined_targets

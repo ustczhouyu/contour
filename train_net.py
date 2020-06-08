@@ -1,60 +1,49 @@
 #!/usr/bin/env python
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 """
-Detectron2 training script with a plain training loop.
+Detection Training Script.
 
-This script reads a given config file and runs the training or evaluation.
-It is an entry point that is able to train standard models in detectron2.
+This scripts reads a given config file and runs the training or evaluation.
+It is an entry point that is made to train standard models in detectron2.
 
 In order to let one script support training of many models,
 this script contains logic that are specific to these built-in models and therefore
 may not be suitable for your own project.
 For example, your research project perhaps only needs a single "evaluator".
 
-Therefore, we recommend you to use detectron2 as a library and take
+Therefore, we recommend you to use detectron2 as an library and take
 this file as an example of how to use the library.
 You may want to write your own script with your datasets and other customizations.
-
-Compared to "train_net.py", this script supports fewer default features.
-It also includes fewer abstraction, therefore is easier to add custom logic.
 """
 
 import logging
 import os
 from collections import OrderedDict
-import numpy as np
 import torch
-from torch.nn.parallel import DistributedDataParallel
+import numpy as np
 
 import detectron2.utils.comm as comm
-from detectron2.checkpoint import DetectionCheckpointer, PeriodicCheckpointer
-from detectron2.data import (build_detection_test_loader,
-                             build_detection_train_loader,)
-from detectron2.engine import default_argument_parser, default_setup, launch
+from detectron2.checkpoint import DetectionCheckpointer
+from detectron2.config import get_cfg
+from detectron2.engine import DefaultTrainer, default_argument_parser, default_setup, hooks, launch
 from detectron2.evaluation import (
-    CityscapesInstanceEvaluator,
-    CityscapesSemSegEvaluator,
     COCOEvaluator,
     COCOPanopticEvaluator,
     DatasetEvaluators,
     LVISEvaluator,
     PascalVOCDetectionEvaluator,
     SemSegEvaluator,
-    inference_on_dataset,
-    print_csv_format,
+    verify_results,
 )
-from detectron2.modeling import build_model
-from detectron2.solver import build_lr_scheduler, build_optimizer
-from detectron2.utils.events import (
-    CommonMetricPrinter,
-    EventStorage,
-    JSONWriter,
-    TensorboardXWriter,
-)
+from detectron2.modeling import GeneralizedRCNNWithTTA
 
 from contour.config import get_cfg
 from contour.modeling import ContourNet
 from contour.data.builtin import MetadataCatalog
+from contour.evaluation import (
+    CityscapesInstanceEvaluator,
+    CityscapesSemSegEvaluator
+)
 
 np.random.seed(1)
 torch.manual_seed(1)
@@ -64,147 +53,91 @@ torch.backends.cudnn.benchmark = True
 logger = logging.getLogger("detectron2")
 
 
-def get_evaluator(cfg, dataset_name, output_folder=None):
+class Trainer(DefaultTrainer):
     """
-    Create evaluator(s) for a given dataset.
-    This uses the special metadata "evaluator_type" associated with each builtin dataset.
-    For your own dataset, you can simply create an evaluator manually in your
-    script and do not have to worry about the hacky if-else logic here.
+    We use the "DefaultTrainer" which contains pre-defined default logic for
+    standard training workflow. They may not work for you, especially if you
+    are working on a new research project. In that case you can use the cleaner
+    "SimpleTrainer", or write your own training loop. You can use
+    "tools/plain_train_net.py" as an example.
     """
-    if output_folder is None:
-        output_folder = os.path.join(cfg.OUTPUT_DIR, "inference")
-    evaluator_list = []
-    evaluator_type = MetadataCatalog.get(dataset_name).evaluator_type
-    if evaluator_type in ["sem_seg", "coco_panoptic_seg"]:
-        evaluator_list.append(
-            SemSegEvaluator(
-                dataset_name,
-                distributed=True,
-                num_classes=cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES,
-                ignore_label=cfg.MODEL.SEM_SEG_HEAD.IGNORE_VALUE,
-                output_dir=output_folder,
+
+    @classmethod
+    def build_evaluator(cls, cfg, dataset_name, output_folder=None):
+        """
+        Create evaluator(s) for a given dataset.
+        This uses the special metadata "evaluator_type" associated with each builtin dataset.
+        For your own dataset, you can simply create an evaluator manually in your
+        script and do not have to worry about the hacky if-else logic here.
+        """
+        if output_folder is None:
+            output_folder = os.path.join(cfg.OUTPUT_DIR, "inference")
+        evaluator_list = []
+        evaluator_type = MetadataCatalog.get(dataset_name).evaluator_type
+        if evaluator_type in ["sem_seg", "coco_panoptic_seg"]:
+            evaluator_list.append(
+                SemSegEvaluator(
+                    dataset_name,
+                    distributed=True,
+                    num_classes=cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES,
+                    ignore_label=cfg.MODEL.SEM_SEG_HEAD.IGNORE_VALUE,
+                    output_dir=output_folder,
+                )
             )
-        )
-    if evaluator_type in ["coco", "coco_panoptic_seg"]:
-        evaluator_list.append(COCOEvaluator(
-            dataset_name, cfg, True, output_folder))
-    if evaluator_type == "coco_panoptic_seg":
-        evaluator_list.append(COCOPanopticEvaluator(
-            dataset_name, output_folder))
-    if evaluator_type == "cityscapes_instance":
-        assert (
-            torch.cuda.device_count() >= comm.get_rank()
-        ), "CityscapesEvaluator currently do not work with multiple machines."
-        return CityscapesInstanceEvaluator(dataset_name)
-    if evaluator_type == "cityscapes_panoptic":
-        assert (
-            torch.cuda.device_count() >= comm.get_rank()
-        ), "CityscapesEvaluator currently do not work with multiple machines."
-        evaluator_list.append(CityscapesSemSegEvaluator(dataset_name)),
-        evaluator_list.append(CityscapesInstanceEvaluator(dataset_name))
-    if evaluator_type == "cityscapes_sem_seg":
-        assert (
-            torch.cuda.device_count() >= comm.get_rank()
-        ), "CityscapesEvaluator currently do not work with multiple machines."
-        return CityscapesSemSegEvaluator(dataset_name)
-    if evaluator_type == "pascal_voc":
-        return PascalVOCDetectionEvaluator(dataset_name)
-    if evaluator_type == "lvis":
-        return LVISEvaluator(dataset_name, cfg, True, output_folder)
-    if len(evaluator_list) == 0:
-        raise NotImplementedError(
-            "no Evaluator for the dataset {} with the type {}".format(
-                dataset_name, evaluator_type)
-        )
-    if len(evaluator_list) == 1:
-        return evaluator_list[0]
-    return DatasetEvaluators(evaluator_list)
+        if evaluator_type in ["coco", "coco_panoptic_seg"]:
+            evaluator_list.append(COCOEvaluator(
+                dataset_name, cfg, True, output_folder))
+        if evaluator_type == "coco_panoptic_seg":
+            evaluator_list.append(COCOPanopticEvaluator(
+                dataset_name, output_folder))
+        if evaluator_type == "cityscapes_instance":
+            assert (
+                torch.cuda.device_count() >= comm.get_rank()
+            ), "CityscapesEvaluator currently do not work with multiple machines."
+            return CityscapesInstanceEvaluator(dataset_name)
+        if evaluator_type == "cityscapes_sem_seg":
+            assert (
+                torch.cuda.device_count() >= comm.get_rank()
+            ), "CityscapesEvaluator currently do not work with multiple machines."
+            return CityscapesSemSegEvaluator(dataset_name)
+        if evaluator_type == "cityscapes_panoptic":
+            assert (
+                torch.cuda.device_count() >= comm.get_rank()
+            ), "CityscapesEvaluator currently do not work with multiple machines."
+            evaluator_list.append(CityscapesSemSegEvaluator(dataset_name)),
+            evaluator_list.append(CityscapesInstanceEvaluator(dataset_name))
+            # evaluator_list.append(CityscapesInstanceEvaluator(dataset_name, output_folder))
+        elif evaluator_type == "pascal_voc":
+            return PascalVOCDetectionEvaluator(dataset_name)
+        elif evaluator_type == "lvis":
+            return LVISEvaluator(dataset_name, cfg, True, output_folder)
+        if len(evaluator_list) == 0:
+            raise NotImplementedError(
+                "no Evaluator for the dataset {} with the type {}".format(
+                    dataset_name, evaluator_type
+                )
+            )
+        elif len(evaluator_list) == 1:
+            return evaluator_list[0]
+        return DatasetEvaluators(evaluator_list)
 
-
-def do_test(cfg, model):
-    results = OrderedDict()
-    for dataset_name in cfg.DATASETS.TEST:
-        data_loader = build_detection_test_loader(cfg, dataset_name)
-        evaluator = get_evaluator(
-            cfg, dataset_name, os.path.join(
-                cfg.OUTPUT_DIR, "inference", dataset_name)
-        )
-        results_i = inference_on_dataset(model, data_loader, evaluator)
-        results[dataset_name] = results_i
-        if comm.is_main_process():
-            logger.info(
-                "Evaluation results for {} in csv format:".format(dataset_name))
-            print_csv_format(results_i)
-    if len(results) == 1:
-        results = list(results.values())[0]
-    return results
-
-
-def do_train(cfg, model, resume=False):
-    model.train()
-    optimizer = build_optimizer(cfg, model)
-    scheduler = build_lr_scheduler(cfg, optimizer)
-
-    checkpointer = DetectionCheckpointer(
-        model, cfg.OUTPUT_DIR, optimizer=optimizer, scheduler=scheduler
-    )
-    start_iter = (
-        checkpointer.resume_or_load(
-            cfg.MODEL.WEIGHTS, resume=resume).get("iteration", -1) + 1
-    )
-    max_iter = cfg.SOLVER.MAX_ITER
-
-    periodic_checkpointer = PeriodicCheckpointer(
-        checkpointer, cfg.SOLVER.CHECKPOINT_PERIOD, max_iter=max_iter
-    )
-
-    writers = (
-        [
-            CommonMetricPrinter(max_iter),
-            JSONWriter(os.path.join(cfg.OUTPUT_DIR, "metrics.json")),
-            TensorboardXWriter(cfg.OUTPUT_DIR),
+    @classmethod
+    def test_with_TTA(cls, cfg, model):
+        logger = logging.getLogger("detectron2.trainer")
+        # In the end of training, run an evaluation with TTA
+        # Only support some R-CNN models.
+        logger.info("Running inference with test-time augmentation ...")
+        model = GeneralizedRCNNWithTTA(cfg, model)
+        evaluators = [
+            cls.build_evaluator(
+                cfg, name, output_folder=os.path.join(
+                    cfg.OUTPUT_DIR, "inference_TTA")
+            )
+            for name in cfg.DATASETS.TEST
         ]
-        if comm.is_main_process()
-        else []
-    )
-
-    # compared to "train_net.py", we do not support accurate timing and
-    # precise BN here, because they are not trivial to implement
-    data_loader = build_detection_train_loader(cfg)
-    logger.info("Starting training from iteration {}".format(start_iter))
-    with EventStorage(start_iter) as storage:
-        for data, iteration in zip(data_loader, range(start_iter, max_iter)):
-            iteration = iteration + 1
-            storage.step()
-
-            loss_dict = model(data)
-            losses = loss_dict['total_loss']
-            assert torch.isfinite(losses).all(), loss_dict
-
-            loss_dict_reduced = {k: v.item()
-                                 for k, v in comm.reduce_dict(loss_dict).items()}
-            if comm.is_main_process():
-                storage.put_scalars(**loss_dict_reduced)
-            optimizer.zero_grad()
-            losses.backward()
-            optimizer.step()
-            storage.put_scalar(
-                "lr", optimizer.param_groups[0]["lr"], smoothing_hint=False)
-            scheduler.step()
-
-            if (
-                cfg.TEST.EVAL_PERIOD > 0
-                and iteration % cfg.TEST.EVAL_PERIOD == 0
-                and iteration != max_iter
-            ):
-                do_test(cfg, model)
-                # Compared to "train_net.py", the test results are not dumped to EventStorage
-                comm.synchronize()
-
-            if iteration - start_iter > 5 and (iteration % 20 == 0 or iteration == max_iter):
-                for writer in writers:
-                    writer.write()
-            periodic_checkpointer.step(iteration)
+        res = cls.test(cfg, model, evaluators)
+        res = OrderedDict({k + "_TTA": v for k, v in res.items()})
+        return res
 
 
 def setup(args):
@@ -215,32 +148,38 @@ def setup(args):
     cfg.merge_from_file(args.config_file)
     cfg.merge_from_list(args.opts)
     cfg.freeze()
-    default_setup(
-        cfg, args
-    )  # if you don't like any of the default setup, write your own setup code
+    default_setup(cfg, args)
     return cfg
 
 
 def main(args):
     cfg = setup(args)
 
-    model = build_model(cfg)
-    logger.info("Model:\n{}".format(model))
     if args.eval_only:
+        model = Trainer.build_model(cfg)
         DetectionCheckpointer(model, save_dir=cfg.OUTPUT_DIR).resume_or_load(
             cfg.MODEL.WEIGHTS, resume=args.resume
         )
-        return do_test(cfg, model)
+        res = Trainer.test(cfg, model)
+        if cfg.TEST.AUG.ENABLED:
+            res.update(Trainer.test_with_TTA(cfg, model))
+        if comm.is_main_process():
+            verify_results(cfg, res)
+        return res
 
-    distributed = comm.get_world_size() > 1
-    if distributed:
-        model = DistributedDataParallel(
-            model, device_ids=[comm.get_local_rank()], broadcast_buffers=False,
-            find_unused_parameters=True
+    """
+    If you'd like to do anything fancier than the standard training logic,
+    consider writing your own training loop (see plain_train_net.py) or
+    subclassing the trainer.
+    """
+    trainer = Trainer(cfg)
+    trainer.resume_or_load(resume=args.resume)
+    if cfg.TEST.AUG.ENABLED:
+        trainer.register_hooks(
+            [hooks.EvalHook(
+                0, lambda: trainer.test_with_TTA(cfg, trainer.model))]
         )
-
-    do_train(cfg, model, resume=args.resume)
-    return do_test(cfg, model)
+    return trainer.train()
 
 
 if __name__ == "__main__":

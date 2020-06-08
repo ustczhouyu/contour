@@ -51,13 +51,43 @@ _C.MODEL.HED_HEAD.IN_FEATURES = ["res2", "res3", "res4", "res5"]
 _C.MODEL.HED_HEAD.LOSS_WEIGHT = 1.0
 _C.MODEL.HED_HEAD.NUM_CLASSES = 1  # 9  # (8 Stuff + 1 background)
 _C.MODEL.HED_HEAD.HUBER_ACTIVE = True
+_C.MODEL.HED_HEAD.DICE_ACTIVE = False
 _C.MODEL.HED_HEAD.NORM = ""
 _C.MODEL.HED_HEAD.RES5_SUPERVISION = False
 
+
 # ---------------------------------------------------------------------------- #
-# HED Head
+# Contour Head
+# ---------------------------------------------------------------------------- #
+_C.MODEL.CONTOUR_HEAD = CN()
+_C.MODEL.CONTOUR_HEAD.NAME = "ContourHead"
+_C.MODEL.CONTOUR_HEAD.LOSS_WEIGHT = 1.0
+_C.MODEL.CONTOUR_HEAD.NUM_CLASSES = 1  # 9  # (8 Stuff + 1 background)
+_C.MODEL.CONTOUR_HEAD.HUBER_ACTIVE = True
+_C.MODEL.CONTOUR_HEAD.DICE_ACTIVE = False
+_C.MODEL.CONTOUR_HEAD.NORM = "GN"
+
+
+# ---------------------------------------------------------------------------- #
+# Semantic with Instance Head
+# ---------------------------------------------------------------------------- #
+_C.MODEL.SEMANTIC_INSTANCE_HEAD = CN()
+_C.MODEL.SEMANTIC_INSTANCE_HEAD.NAME = "SemanticInstanceHead"
+_C.MODEL.SEMANTIC_INSTANCE_HEAD.LOSS_WEIGHT = 1.0
+_C.MODEL.SEMANTIC_INSTANCE_HEAD.NUM_CLASSES = 27  # (19 seg + 1 or 8 contours)
+_C.MODEL.SEMANTIC_INSTANCE_HEAD.DUAL_LOSS = False
+_C.MODEL.SEMANTIC_INSTANCE_HEAD.HUBER_ACTIVE = True
+_C.MODEL.SEMANTIC_INSTANCE_HEAD.DICE_ACTIVE = False
+_C.MODEL.SEMANTIC_INSTANCE_HEAD.DUAL_LOSS_WEIGHT = 50.0
+_C.MODEL.SEMANTIC_INSTANCE_HEAD.NORM = "GN"
+_C.MODEL.SEMANTIC_INSTANCE_HEAD.IGNORE_VALUE = 255
+
+# ---------------------------------------------------------------------------- #
+# Contour Net Meta Arch
 # ---------------------------------------------------------------------------- #
 _C.MODEL.CONTOUR_NET = CN()
+_C.MODEL.CONTOUR_NET.ARCH = "dual_heads"
+# dual_decoders, dual_blocks, dual_heads, single_head
 
 # options when combining instance & semantic segmentation outputs
 _C.MODEL.CONTOUR_NET.COMBINE = CN({"ENABLED": False})
