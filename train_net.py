@@ -42,7 +42,8 @@ from contour.modeling import ContourNet
 from contour.data.builtin import MetadataCatalog
 from contour.evaluation import (
     CityscapesInstanceEvaluator,
-    CityscapesSemSegEvaluator
+    CityscapesSemSegEvaluator,
+    CityscapesPanopticEvaluator
 )
 
 np.random.seed(1)
@@ -104,9 +105,9 @@ class Trainer(DefaultTrainer):
             assert (
                 torch.cuda.device_count() >= comm.get_rank()
             ), "CityscapesEvaluator currently do not work with multiple machines."
-            evaluator_list.append(CityscapesSemSegEvaluator(dataset_name)),
+            evaluator_list.append(CityscapesSemSegEvaluator(dataset_name))
             evaluator_list.append(CityscapesInstanceEvaluator(dataset_name))
-            # evaluator_list.append(CityscapesInstanceEvaluator(dataset_name, output_folder))
+            evaluator_list.append(CityscapesPanopticEvaluator(dataset_name))
         elif evaluator_type == "pascal_voc":
             return PascalVOCDetectionEvaluator(dataset_name)
         elif evaluator_type == "lvis":

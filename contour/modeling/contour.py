@@ -333,7 +333,6 @@ def combine_semantic_and_instance_outputs(
     panoptic_seg = torch.zeros_like(semantic_results, dtype=torch.int32)
     current_segment_id = 0
     segments_info = []
-    print(instance_results)
     instance_masks = instance_results.pred_masks.to(
         dtype=torch.bool, device=panoptic_seg.device)
     # Add instances one-by-one, check for overlaps with existing ones

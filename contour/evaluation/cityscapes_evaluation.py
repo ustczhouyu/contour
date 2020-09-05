@@ -3,7 +3,12 @@ import glob
 import logging
 import numpy as np
 import os
+import io
+import itertools
+from tabulate import tabulate
+import json
 import tempfile
+import contextlib
 from collections import OrderedDict
 import torch
 from fvcore.common.file_io import PathManager
@@ -191,6 +196,7 @@ class CityscapesSemSegEvaluator(CityscapesEvaluator):
         self._working_dir.cleanup()
         return ret
 
+
 class CityscapesPanopticEvaluator(CityscapesEvaluator):
     """
     Evaluate Panoptic Quality metrics on Cityscapes using cityscapesscripts.
@@ -200,6 +206,7 @@ class CityscapesPanopticEvaluator(CityscapesEvaluator):
         self._predictions = []
 
     def _convert_category_id(self, segment_info):
+        from cityscapesscripts.helpers.labels import name2label
         isthing = segment_info.pop("isthing", None)
         if isthing is None:
             # the model produces panoptic category id directly. No more conversion needed
@@ -207,7 +214,7 @@ class CityscapesPanopticEvaluator(CityscapesEvaluator):
         if isthing is True:
             classes = self._metadata.thing_classes[segment_info["category_id"]]
         else:
-            classes = self.stuff_classes[segment_info["category_id"]]
+            classes = self._metadata.stuff_classes[segment_info["category_id"]]
         segment_info["category_id"] = name2label[classes].id
         return segment_info
 
@@ -218,15 +225,18 @@ class CityscapesPanopticEvaluator(CityscapesEvaluator):
             panoptic_img, segments_info = output["panoptic_seg"]
             panoptic_img = panoptic_img.cpu().numpy()
 
-            file_name = os.path.basename(input["file_name"])
-            file_name_png = os.path.splitext(file_name)[0] + ".png"
+            file_name = input["file_name"]
+            file_name = os.path.splitext(os.path.basename(file_name))[0]
+            image_id = '_'.join(file_name.split('_')[:-1])
+            pred_filename = image_id + "_pred.png"
+
             with io.BytesIO() as out:
                 Image.fromarray(id2rgb(panoptic_img)).save(out, format="PNG")
                 segments_info = [self._convert_category_id(x) for x in segments_info]
                 self._predictions.append(
                     {
-                        "image_id": input["image_id"],
-                        "file_name": file_name_png,
+                        "image_id": image_id,
+                        "file_name": pred_filename,
                         "png_string": out.getvalue(),
                         "segments_info": segments_info,
                     }
@@ -234,7 +244,9 @@ class CityscapesPanopticEvaluator(CityscapesEvaluator):
 
     def evaluate(self):
         comm.synchronize()
-        if comm.get_rank() > 0:
+        self._predictions = comm.gather(self._predictions)
+        self._predictions = list(itertools.chain(*self._predictions))
+        if not comm.is_main_process():
             return
 
         # PanopticApi requires local files
@@ -242,7 +254,7 @@ class CityscapesPanopticEvaluator(CityscapesEvaluator):
         gt_folder = PathManager.get_local_path(self._metadata.panoptic_root)
 
         with tempfile.TemporaryDirectory(prefix="panoptic_eval") as pred_dir:
-            logger.info("Writing all panoptic predictions to {} ...".format(pred_dir))
+            self._logger.info("Writing all panoptic predictions to {} ...".format(pred_dir))
             for p in self._predictions:
                 with open(os.path.join(pred_dir, p["file_name"]), "wb") as f:
                     f.write(p.pop("png_string"))
@@ -250,17 +262,20 @@ class CityscapesPanopticEvaluator(CityscapesEvaluator):
             with open(gt_json, "r") as f:
                 json_data = json.load(f)
             json_data["annotations"] = self._predictions
-            with PathManager.open(self._predictions_json, "w") as f:
+            predictions_json = os.path.join(pred_dir, "cityscapes_panoptic_val.json")
+            results_json = os.path.join(pred_dir, "resultPanopticSemanticLabeling.json")
+            with PathManager.open(predictions_json, "w") as f:
                 f.write(json.dumps(json_data))
 
-            import cityscapesscripts.evaluation.evalPanopticSemanticLabeling as evaluatePanoptic
+            from cityscapesscripts.evaluation.evalPanopticSemanticLabeling import evaluatePanoptic
 
             with contextlib.redirect_stdout(io.StringIO()):
                 pq_res = evaluatePanoptic(
                     gt_json,
-                    pred_json_file=PathManager.get_local_path(self._predictions_json),
+                    pred_json_file=PathManager.get_local_path(predictions_json),
                     gt_folder=gt_folder,
                     pred_folder=pred_dir,
+                    resultsFile=PathManager.get_local_path(results_json)
                 )
 
         res = {}
@@ -275,19 +290,19 @@ class CityscapesPanopticEvaluator(CityscapesEvaluator):
         res["RQ_st"] = 100 * pq_res["Stuff"]["rq"]
 
         results = OrderedDict({"panoptic_seg": res})
-        _print_panoptic_results(pq_res)
+        self._print_panoptic_results(pq_res)
 
         return results
 
 
-def _print_panoptic_results(pq_res):
-    headers = ["", "PQ", "SQ", "RQ", "#categories"]
-    data = []
-    for name in ["All", "Things", "Stuff"]:
-        row = [name] + [pq_res[name][k] * 100 for k in ["pq", "sq", "rq"]] + [pq_res[name]["n"]]
-        data.append(row)
-    table = tabulate(
-        data, headers=headers, tablefmt="pipe", floatfmt=".3f", stralign="center", numalign="center"
-    )
-    logger.info("Panoptic Evaluation Results:\n" + table)
-    
+    def _print_panoptic_results(self, pq_res):
+        headers = ["", "PQ", "SQ", "RQ", "#categories"]
+        data = []
+        for name in ["All", "Things", "Stuff"]:
+            row = [name] + [pq_res[name][k] * 100 for k in ["pq", "sq", "rq"]] + [pq_res[name]["n"]]
+            data.append(row)
+        table = tabulate(
+            data, headers=headers, tablefmt="pipe", floatfmt=".3f", stralign="center", numalign="center"
+        )
+        self._logger.info("Panoptic Evaluation Results:\n" + table)
+        

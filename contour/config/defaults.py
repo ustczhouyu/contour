@@ -90,7 +90,7 @@ _C.MODEL.CONTOUR_NET.ARCH = "dual_heads"
 # dual_decoders, dual_blocks, dual_heads, single_head
 
 # options when combining instance & semantic segmentation outputs
-_C.MODEL.CONTOUR_NET.COMBINE = CN({"ENABLED": False})
+_C.MODEL.CONTOUR_NET.COMBINE = CN({"ENABLED": True})
 _C.MODEL.CONTOUR_NET.COMBINE.OVERLAP_THRESH = 0.5
 _C.MODEL.CONTOUR_NET.COMBINE.STUFF_AREA_LIMIT = 4096
 _C.MODEL.CONTOUR_NET.COMBINE.INSTANCES_CONFIDENCE_THRESH = 0.5
