@@ -706,7 +706,7 @@ def get_gt(instances, image_sizes, num_classes):
             g_w, g_h = np.meshgrid(np.arange(width), np.arange(height))
             x_s, y_s = np.nonzero(bit_mask_cropped)
             c_x, c_y = np.mean(x_s), np.mean(y_s)
-            weight = 100/((np.min((np.sum(bit_mask_cropped), 99))+1))
+            weight = 1000/((np.min((np.sum(bit_mask_cropped), 999))+1))
             offset_cropped[0] = (g_h - c_x)*bit_mask_cropped
             offset_cropped[1] = (g_w - c_y)*bit_mask_cropped
             offset_cropped[2] = weight*bit_mask_cropped
@@ -723,7 +723,8 @@ def get_gt(instances, image_sizes, num_classes):
                 contour_im[label, ymin:ymax, xmin:xmax] = cv2.drawContours(
                     img[ymin:ymax, xmin:xmax], cnts, -1, 1, 2)
 
-            offset_im[:, ymin:ymax, xmin:xmax] = offset_cropped
+            offset_im[:, ymin:ymax, xmin:xmax] += offset_cropped
+        offset_im[2] += 0.01
         # pylint: disable=no-member
         contours.append(torch.from_numpy(contour_im).float())
         offsets.append(torch.from_numpy(offset_im))

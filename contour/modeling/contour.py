@@ -298,7 +298,8 @@ class ContourNet(nn.Module):
         seg_anno_img = seg_anno_img.draw_sem_seg(sem_seg=seg_anno)
         seg_anno_img = seg_anno_img.get_image()
         seg_pred = Visualizer(img, self.metadata)
-        seg_pred = seg_pred.draw_sem_seg(sem_seg=results[image_index]["sem_seg"])
+        seg_pred = seg_pred.draw_sem_seg(
+            sem_seg=results[image_index]["sem_seg"])
         seg_pred = seg_pred.get_image()
         seg_vis_img = np.vstack((seg_anno_img, seg_pred))
         seg_vis_img = seg_vis_img.transpose(2, 0, 1)
@@ -326,7 +327,8 @@ class ContourNet(nn.Module):
         storage.put_image(cont_name, cont_img)
 
         offset_gt = Visualizer(img, None)
-        offset_gt = offset_gt.draw_offsets(gt_offsets[image_index].cpu())
+        offset_gt = offset_gt.draw_offsets(
+            gt_offsets[image_index][:2, :, :].cpu())
         offset_gt = offset_gt.get_image()
         offset_pred = Visualizer(img, None)
         offset_pred = offset_pred.draw_offsets(results[image_index]["offsets"])
