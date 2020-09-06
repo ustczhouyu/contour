@@ -1,3 +1,4 @@
+"""Builtin dataset script."""
 import os
 import copy
 
@@ -39,6 +40,13 @@ _RAW_CITYSCAPES_SPLITS = {
 
 
 def register_panoptic_cityscapes(root, meta, split='train'):
+    """Register panoptic cityscapes dataset.
+
+    Args:
+        root ([str]): [Path to root directory of dataset.]
+        meta ([dict]): [metadata of the cityscapes panoptic segmentation dataset]
+        split (str): [train/val]. Defaults to 'train'.
+    """
     image_dir = "cityscapes/leftImg8bit/{split}".format(split=split)
     gt_dir = "cityscapes/gtFine/{split}".format(split=split)
     image_dir = os.path.join(root, image_dir)
@@ -57,7 +65,8 @@ def register_panoptic_cityscapes(root, meta, split='train'):
 
 
 def merge_to_panoptic(detection_dicts, sem_seg_dicts):
-    """
+    """Merge segmentation and instances dicts.
+
     Create dataset dicts for panoptic segmentation, by
     merging two dicts using "file_name" field to match their entries.
 
@@ -82,9 +91,7 @@ def merge_to_panoptic(detection_dicts, sem_seg_dicts):
 
 
 def _get_cityscapes_panoptic_meta(root):
-    """
-    Returns metadata of the cityscapes panoptic segmentation dataset.
-    """
+    """Return metadata of the cityscapes panoptic segmentation dataset."""
     meta = _get_builtin_metadata("cityscapes")
     stuff_colors = [k["color"] for k in CITYSCAPES_CATEGORIES]
     thing_colors = [k["color"]
@@ -99,7 +106,7 @@ def _get_cityscapes_panoptic_meta(root):
 
 
 _root = os.getenv("DETECTRON2_DATASETS", "datasets")
-meta = _get_cityscapes_panoptic_meta(_root)
-register_panoptic_cityscapes(_root, meta, split='train')
-register_panoptic_cityscapes(_root, meta, split='val')
-register_panoptic_cityscapes(_root, meta, split='test')
+_meta = _get_cityscapes_panoptic_meta(_root)
+register_panoptic_cityscapes(_root, _meta, split='train')
+register_panoptic_cityscapes(_root, _meta, split='val')
+register_panoptic_cityscapes(_root, _meta, split='test')

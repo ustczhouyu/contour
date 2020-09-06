@@ -1,29 +1,24 @@
-from typing import Dict
+"""Utility Scripts for CounterNet Modeling."""
 import math
-import copy
+from typing import Dict
+
+import cv2
 import fvcore.nn.weight_init as weight_init
 import numpy as np
-import cv2
 import torch
-from torch import nn
-from torch.nn import functional as F
-from torch.autograd import Variable
-
-
-from detectron2.layers import Conv2d, ConvTranspose2d, ShapeSpec, get_norm
-from detectron2.structures import ImageList, polygons_to_bitmask
-from detectron2.utils.registry import Registry
-from detectron2.modeling.backbone.fpn import FPN, LastLevelMaxPool
+from detectron2.layers import Conv2d, ShapeSpec, get_norm
 from detectron2.modeling import Backbone
+from detectron2.modeling.backbone.fpn import LastLevelMaxPool
+from detectron2.utils.registry import Registry
+from torch import nn
+from torch.autograd import Variable
+from torch.nn import functional as F
 
-from ..layers.losses import HuberLoss, WeightedBinaryCrossEntropy, \
-    WeightedMultiClassBinaryCrossEntropy
-from .visualization import rgb_from_gt_contours, rgb_from_pred_contours
-import matplotlib.pyplot as plt
-from .postprocessing import to_rgb
+# pylint: disable=relative-beyond-top-level
+from ..layers.losses import (HuberLoss, WeightedBinaryCrossEntropy,
+                             WeightedMultiClassBinaryCrossEntropy)
 
-
-__all__ = ["FPNBLOCK", "build_fpn_BLOCK", "HEDHead", "build_hed_head",
+__all__ = ["FPNBlock", "build_fpn_block", "HedDecoder", "build_hed_decoder",
            "SemSegHead", "build_sem_seg_head", 'build_contour_head',
            "CenterRegHead", "build_center_reg_head", "ContourHead",
            "build_semantic_instance_head", "SemanticInstanceHead"]
@@ -33,8 +28,8 @@ FPN_BLOCKS_REGISTRY = Registry("FPN_BLOCKS")
 FPN_BLOCKS_REGISTRY.__doc__ = """ Registry for FPN BLOCKs, which make combines
  feature maps from different levels."""
 
-HED_HEAD_REGISTRY = Registry("HED_HEAD")
-HED_HEAD_REGISTRY.__doc__ = """ Registry for HED_HEAD, which generates contours
+HED_DECODER_REGISTRY = Registry("HED_DECODER")
+HED_DECODER_REGISTRY.__doc__ = """ Registry for HED_DECODER, which generates contours
  from backbone feature maps."""
 
 SEM_SEG_HEAD_REGISTRY = Registry("SEM_SEG_HEAD")
@@ -56,7 +51,8 @@ SEMANTIC_INSTANCE_HEAD_REGISTRY.__doc__ = """ Registry for
 
 
 def build_fpn(cfg, input_shape: ShapeSpec):
-    """
+    """Build feature pyramid network.
+
     Args:
         cfg: a detectron2 CfgNode
         bottom_up(Backbone): bottom_up backbone
@@ -78,60 +74,54 @@ def build_fpn(cfg, input_shape: ShapeSpec):
 
 
 def build_fpn_block(cfg, input_shape):
-    """
-    Build an FPN block from `cfg.MODEL.FPN_BLOCK.NAME`.
-    """
+    """Build an FPN block from `cfg.MODEL.FPN_BLOCK.NAME`."""
     name = cfg.MODEL.FPN_BLOCK.NAME
     return FPN_BLOCKS_REGISTRY.get(name)(cfg, input_shape)
 
 
-def build_hed_head(cfg, input_shape):
-    """
-    Build an HED head from `cfg.MODEL.HED_HEAD.NAME`.
-    """
-    name = cfg.MODEL.HED_HEAD.NAME
-    return HED_HEAD_REGISTRY.get(name)(cfg, input_shape)
+def build_hed_decoder(cfg, input_shape):
+    """Build an HED decoder from `cfg.MODEL.HED_DECODER.NAME`."""
+    name = cfg.MODEL.HED_DECODER.NAME
+    return HED_DECODER_REGISTRY.get(name)(cfg, input_shape)
 
 
 def build_sem_seg_head(cfg, input_shape):
-    """
-    Build an semantic segmentation predictior from
-     `cfg.MODEL.SEM_SEG_HEAD.NAME`.
+    """Build a semantic segmentation predictior.
+
+    Uses `cfg.MODEL.SEM_SEG_HEAD.NAME`.
     """
     name = cfg.MODEL.SEM_SEG_HEAD.NAME
     return SEM_SEG_HEAD_REGISTRY.get(name)(cfg, input_shape)
 
 
 def build_semantic_instance_head(cfg, input_shape):
-    """
-    Build a joint semantic segmentation and contour predictior from
-     `cfg.MODEL.SEMANTIC_INSTANCE_HEAD.NAME`.
+    """Build a joint semantic segmentation and contour predictior.
+
+    Uses `cfg.MODEL.SEMANTIC_INSTANCE_HEAD.NAME`.
     """
     name = cfg.MODEL.SEMANTIC_INSTANCE_HEAD.NAME
     return SEMANTIC_INSTANCE_HEAD_REGISTRY.get(name)(cfg, input_shape)
 
 
 def build_center_reg_head(cfg, input_shape):
-    """
-    Build an center regression predictior from
-     `cfg.MODEL.CENTER_REG_HEAD.NAME`.
+    """Build an center regression predictior.
+
+    Uses `cfg.MODEL.CENTER_REG_HEAD.NAME`.
     """
     name = cfg.MODEL.CENTER_REG_HEAD.NAME
     return CENTER_REG_HEAD_REGISTRY.get(name)(cfg, input_shape)
 
 
 def build_contour_head(cfg, input_shape):
-    """
-    Build an center regression predictior from
-     `cfg.MODEL.CONTOUR_HEAD.NAME`.
-    """
+    """Build an center regression predictior from `cfg.MODEL.CONTOUR_HEAD.NAME`."""
     name = cfg.MODEL.CONTOUR_HEAD.NAME
     return CONTOUR_HEAD_REGISTRY.get(name)(cfg, input_shape)
 
 
 @FPN_BLOCKS_REGISTRY.register()
 class FPNBlock(nn.Module):
-    """
+    """Feature pyramid block.
+
     An FPN BLOCK similar to semantic segmentation FPN BLOCK
     described in :paper:`PanopticFPN` the predictor is removed.
     It takes FPN features as input and merges information from all
@@ -180,20 +170,18 @@ class FPNBlock(nn.Module):
             self.scale_blocks.append(nn.Sequential(*block_ops))
             self.add_module(in_feature, self.scale_blocks[-1])
 
-    def forward(self, features, targets=None):
+    # pylint: disable=arguments-differ
+    def forward(self, features):
         """
         Returns:
             Merged output from all layers of FPN
         """
-        return self.layers(features)
-
-    def layers(self, features):
-        for i, f in enumerate(self.in_features):
+        for i, feature in enumerate(self.in_features):
             if i == 0:
-                x = self.scale_blocks[i](features[f])
+                out = self.scale_blocks[i](features[feature])
             else:
-                x = x + self.scale_blocks[i](features[f])
-        return x
+                out = out + self.scale_blocks[i](features[feature])
+        return out
 
     def output_shape(self):
         """
@@ -204,42 +192,38 @@ class FPNBlock(nn.Module):
         return ShapeSpec(channels=self.conv_dims, stride=self.common_stride)
 
 
-@HED_HEAD_REGISTRY.register()
-class HEDHead(nn.Module):
+# pylint: disable=too-many-instance-attributes
+@HED_DECODER_REGISTRY.register()
+class HedDecoder(nn.Module):
     """
-    An HED (Holistic Edge Detection Network) Head that takes backbone inputs
-     and generates generates contours. This is modified implementation adapted
+    An HED (Holistic Edge Detection Network) Decoder that takes backbone inputs
+     and generates contours. This is modified implementation adapted
      from HED and CASENet.
     """
 
     def __init__(self, cfg, input_shape: Dict[str, ShapeSpec]):
         super().__init__()
-        self.in_features = cfg.MODEL.HED_HEAD.IN_FEATURES
+        self.in_features = cfg.MODEL.HED_DECODER.IN_FEATURES
         n_feats = len(self.in_features)
         feature_strides = {k: v.stride for k, v in input_shape.items()}
         feature_channels = {k: v.channels for k, v in input_shape.items()}
-        self.loss_weight = cfg.MODEL.HED_HEAD.LOSS_WEIGHT
-        norm = cfg.MODEL.HED_HEAD.NORM
-        num_classes = cfg.MODEL.HED_HEAD.NUM_CLASSES
+        self.loss_weight = cfg.MODEL.HED_DECODER.LOSS_WEIGHT
+        norm = cfg.MODEL.HED_DECODER.NORM
+        num_classes = cfg.MODEL.HED_DECODER.NUM_CLASSES
         self.num_classes = num_classes
-        self.huber_active = cfg.MODEL.HED_HEAD.HUBER_ACTIVE
-        self.dice_active = cfg.MODEL.HED_HEAD.DICE_ACTIVE
-        self.res5_supervision = cfg.MODEL.HED_HEAD.RES5_SUPERVISION
+        self.huber_active = cfg.MODEL.HED_DECODER.HUBER_ACTIVE
+        self.dice_active = cfg.MODEL.HED_DECODER.DICE_ACTIVE
+        self.res5_supervision = cfg.MODEL.HED_DECODER.RES5_SUPERVISION
         self.scale_blocks = []
         for in_feature in self.in_features:
             out_dims = 1
-            activation = F.relu
             norm_module = get_norm(norm, out_dims)
             if in_feature == self.in_features[-1]:
                 out_dims = num_classes
                 if self.res5_supervision:
-                    activation = None
                     norm_module = get_norm("", out_dims)
 
-            # if in_feature == self.in_features[0]:
             block_stride = 2**max(1, int(np.log2(feature_strides[in_feature])))
-            # else:
-            #    block_stride = 1
 
             block_ops = []
 
@@ -269,6 +253,7 @@ class HEDHead(nn.Module):
                                    groups=num_classes)
         weight_init.c2_msra_fill(self.predictor)
 
+    # pylint: disable=arguments-differ
     def forward(self, features, targets=None):
         """
         Returns:
@@ -278,29 +263,32 @@ class HEDHead(nn.Module):
         fused, res5 = self.layers(features)
         if self.training:
             return fused, self.losses(fused, res5, targets)
-        else:
-            return fused, {}
+
+        return fused, {}
 
     def layers(self, features):
-        x = []
-        for i, f in enumerate(self.in_features):
-            x.append(self.scale_blocks[i](features[f]))
-            if f == self.in_features[-1] and self.res5_supervision:
-                res5 = x[i]
-        x = self.shared_concat(x, self.num_classes)
-        x = self.predictor(x)
-        # print(torch.unique(torch.sigmoid(x[0])))
-        # axis = plt.subplots(1, 2)[-1]
-        # axis[0].imshow(rgb_from_pred_contours(x[0].squeeze().cpu().numpy()))
-        # axis[1].imshow(rgb_from_pred_contours(
-        #     x[0].squeeze().cpu().numpy(), thinned=True))
-        # plt.show()
+        """Merge output from all layers of FPN.
+
+        Args:
+            features ([type]): [Output from different layers.]
+
+        Returns:
+            [type]: [Merged output from all layers.]
+        """
+        out = []
+        for i, feat in enumerate(self.in_features):
+            out.append(self.scale_blocks[i](features[feat]))
+            if feat == self.in_features[-1] and self.res5_supervision:
+                res5 = out[i]
+        out = shared_concat(out, self.num_classes)
+        out = self.predictor(out)
         if self.res5_supervision:
-            return x, res5
-        else:
-            return x, None
+            return out, res5
+
+        return out, None
 
     def losses(self, fused, res5, targets):
+        """Compute losses."""
         if fused.size()[-2:] != targets.size()[-2:]:
             fused = F.interpolate(fused, size=targets.size()[-2:],
                                   mode="bilinear", align_corners=True)
@@ -318,9 +306,6 @@ class HEDHead(nn.Module):
             loss_res5 = loss_fn(res5, targets.squeeze())
             loss = {k: 0.5*loss_fused[k] + 0.5*loss_res5[k]
                     for k in loss_fused.keys()}
-            # print('loss_fused:', loss_fused)
-            # print('loss_res5:', loss_res5)
-            # print('total_loss:', loss)
         else:
             loss = loss_fn(fused, targets.squeeze())
         losses = {k: v * self.loss_weight for k, v in loss.items()}
@@ -334,22 +319,25 @@ class HEDHead(nn.Module):
         # this is a backward-compatible default
         return ShapeSpec(channels=self.conv_dims, stride=self.common_stride)
 
-    def shared_concat(self, features, num_classes):
-        n_feats = len(features)
-        out_dim = num_classes * n_feats
-        out_tensor = Variable(torch.FloatTensor(features[-1].size(0),
-                                                out_dim,
-                                                features[-1].size(2),
-                                                features[-1].size(3))).cuda()
-        class_num = 0
-        for i in range(0, out_dim, n_feats):
-            out_tensor[:, i, :, :] = features[-1][:, class_num, :, :]
-            class_num += 1
-            # It needs this trick for multibatch
-            for j in range(n_feats-1):
-                out_tensor[:, i + j + 1, :, :] = features[j][:, 0, :, :]
 
-        return out_tensor
+def shared_concat(features, num_classes):
+    """Perform shared concatenation."""
+    n_feats = len(features)
+    out_dim = num_classes * n_feats
+    # pylint: disable=no-member
+    out_tensor = Variable(torch.FloatTensor(features[-1].size(0),
+                                            out_dim,
+                                            features[-1].size(2),
+                                            features[-1].size(3))).cuda()
+    class_num = 0
+    for i in range(0, out_dim, n_feats):
+        out_tensor[:, i, :, :] = features[-1][:, class_num, :, :]
+        class_num += 1
+        # It needs this trick for multibatch
+        for j in range(n_feats-1):
+            out_tensor[:, i + j + 1, :, :] = features[j][:, 0, :, :]
+
+    return out_tensor
 
 
 @SEM_SEG_HEAD_REGISTRY.register()
@@ -369,22 +357,23 @@ class SemSegHead(nn.Module):
                                 kernel_size=1, stride=1, padding=0)
         weight_init.c2_msra_fill(self.predictor)
 
+    # pylint: disable=arguments-differ
     def forward(self, features, targets=None):
         """
         Returns:
             In training, returns (None, dict of losses)
             In inference, returns (CxHxW logits, {})
         """
-        x = self.predictor(features)
+        out = self.predictor(features)
         if self.training:
-            return x, self.losses(x, targets)
-        else:
-            return x, {}
+            return out, self.losses(out, targets)
+        return out, {}
 
     def losses(self, predictions, targets):
-        x = F.interpolate(predictions, size=targets.size()[-2:],
-                          mode="bilinear", align_corners=True)
-        loss = F.cross_entropy(x, targets, reduction="mean",
+        """Compute loss."""
+        out = F.interpolate(predictions, size=targets.size()[-2:],
+                            mode="bilinear", align_corners=True)
+        loss = F.cross_entropy(out, targets, reduction="mean",
                                ignore_index=self.ignore_value)
         losses = {"loss_sem_seg": loss * self.loss_weight}
         return losses
@@ -413,34 +402,36 @@ class SemanticInstanceHead(nn.Module):
                                 kernel_size=1, stride=1, padding=0)
         weight_init.c2_msra_fill(self.predictor)
 
+    # pylint: disable=arguments-differ
     def forward(self, features, seg_targets, contour_targets):
         """
         Returns:
             In training, returns (None, dict of losses)
             In inference, returns (CxHxW logits, {})
         """
-        x = self.predictor(features)
+        out = self.predictor(features)
         if self.training:
-            return x, self.losses(x, seg_targets, contour_targets)
-        else:
-            return x, {}
+            return out, self.losses(out, seg_targets, contour_targets)
+
+        return out, {}
 
     def losses(self, predictions, seg_targets, contour_targets):
-        x = F.interpolate(predictions, size=seg_targets.size()[-2:],
-                          mode="bilinear", align_corners=True)
+        """Compute loss."""
+        out = F.interpolate(predictions, size=seg_targets.size()[-2:],
+                            mode="bilinear", align_corners=True)
         combined_targets = combine_seg_contour_targets(
             seg_targets, contour_targets)
-        seg_loss = F.cross_entropy(x, combined_targets, reduction="mean",
+        seg_loss = F.cross_entropy(out, combined_targets, reduction="mean",
                                    ignore_index=self.ignore_value)
         losses = {"loss_sem_seg": seg_loss * self.loss_weight}
 
         if self.dual_loss:
-            contour_preds = x[:, 19:, ...]
+            contour_preds = out[:, 19:, ...]
             loss_fn = WeightedMultiClassBinaryCrossEntropy(self.huber_active,
                                                            self.dice_active)
             contour_loss = loss_fn(contour_preds, contour_targets)
             losses.update({k: v * self.loss_weight
-                            for k, v in contour_loss.items()})
+                           for k, v in contour_loss.items()})
         return losses
 
 
@@ -462,23 +453,25 @@ class ContourHead(nn.Module):
                                 kernel_size=1, stride=1, padding=0)
         weight_init.c2_msra_fill(self.predictor)
 
+    # pylint: disable=arguments-differ
     def forward(self, features, targets=None):
         """
         Returns:
             In training, returns (None, dict of losses)
             In inference, returns (CxHxW logits, {})
         """
-        x = self.predictor(features)
+        out = self.predictor(features)
         if self.training:
-            return x, self.losses(x, targets)
-        else:
-            return x, {}
+            return out, self.losses(out, targets)
+
+        return out, {}
 
     def losses(self, predictions, targets):
-        x = F.interpolate(predictions, size=targets.size()[-2:],
-                          mode="bilinear", align_corners=True)
+        """Compute loss."""
+        out = F.interpolate(predictions, size=targets.size()[-2:],
+                            mode="bilinear", align_corners=True)
         loss = WeightedMultiClassBinaryCrossEntropy(self.huber_active,
-                                                    self.dice_active)(x, targets)
+                                                    self.dice_active)(out, targets)
         losses = {k: v * self.loss_weight for k, v in loss.items()}
         return losses
 
@@ -492,67 +485,30 @@ class CenterRegHead(nn.Module):
 
     def __init__(self, cfg, input_shape: Dict[str, ShapeSpec]):
         super().__init__()
-        norm = cfg.MODEL.CENTER_REG_HEAD.NORM
-        feature_channels = input_shape.channels
         num_classes = 2
-        stride = input_shape.stride
-        kernel_size = cfg.MODEL.CENTER_REG_HEAD.CONV_KERNEL_SIZE
-        self.num_upsamples = max(1, int(np.log2(stride)))
+        feature_channels = input_shape.channels
         self.loss_weight = cfg.MODEL.CENTER_REG_HEAD.LOSS_WEIGHT
-        self.upsample_blocks = []
-        ops = []
-        for k in range(self.num_upsamples):
-            in_channels = feature_channels if k == 0 else out_channels
-            out_channels = int(feature_channels * (1 + (k + 1)/2))
-            norm_module = nn.GroupNorm(
-                32, out_channels) if norm == "GN" else None
-            norm_ = norm_module if k != self.num_upsamples - 1 else None
-            act_ = F.relu if k != self.num_upsamples - 1 else None
-            conv = Conv2d(
-                in_channels,
-                out_channels,
-                kernel_size=kernel_size,
-                stride=1,
-                padding=int(kernel_size/2),
-                norm=norm_,
-                activation=act_
-            )
-            weight_init.c2_msra_fill(conv)
-            ops.append(conv)
-            ops.append(
-                nn.Upsample(scale_factor=2, mode="bilinear",
-                            align_corners=True)
-            )
-        self.upsample_blocks.append(nn.Sequential(*ops))
-        self.add_module('upsample_block', self.upsample_blocks[-1])
-        self.predictor = Conv2d(out_channels, num_classes,
+        self.predictor = Conv2d(feature_channels, num_classes,
                                 kernel_size=1, stride=1, padding=0)
         weight_init.c2_msra_fill(self.predictor)
 
+    # pylint: disable=arguments-differ
     def forward(self, features, targets=None):
         """
         Returns:
             In training, returns (None, dict of losses)
             In inference, returns (CxHxW logits, {})
         """
-
-        x = self.layers(features)
+        out = self.predictor(features)
         if self.training:
-            return x, self.losses(x, targets)
-        else:
-            return x, {}
-
-    def layers(self, features):
-        for i in range(self.num_upsamples):
-            if i == 0:
-                x = self.upsample_blocks[i](features)
-            else:
-                x = self.upsample_blocks[i](x)
-        x = self.predictior(x)
-        return x
+            return out, self.losses(out, targets)
+        return out, {}
 
     def losses(self, predictions, targets):
-        loss = HuberLoss()(predictions, targets['vecs'], targets['mask'])
+        """Compute loss."""
+        out = F.interpolate(predictions, size=targets.size()[-2:],
+                            mode="bilinear", align_corners=True)
+        loss = HuberLoss()(out, targets[:, :2, :, :], targets[:, 2, :, :])
         losses = {"loss_center_reg": loss * self.loss_weight}
         return losses
 
@@ -562,6 +518,8 @@ class FPN(Backbone):
     This module implements :paper:`FPN`.
     It creates pyramid features built on top of some input feature maps.
     """
+    # pylint: disable=too-many-locals
+    # pylint: disable=too-many-arguments
 
     def __init__(
         self, input_shapes, in_features, out_channels, norm="", top_block=None, fuse_type="sum"
@@ -585,7 +543,7 @@ class FPN(Backbone):
                 ones. It can be "sum" (default), which sums up element-wise; or "avg",
                 which takes the element-wise mean of the two.
         """
-        super(FPN, self).__init__()
+        super().__init__()
 
         # Feature map strides and channels from the bottom up network (e.g. ResNet)
         in_strides = [input_shapes[f].stride for f in in_features]
@@ -631,8 +589,8 @@ class FPN(Backbone):
             int(math.log2(s))): s for s in in_strides}
         # top block output feature maps.
         if self.top_block is not None:
-            for s in range(stage, stage + self.top_block.num_levels):
-                self._out_feature_strides["p{}".format(s + 1)] = 2 ** (s + 1)
+            for i in range(stage, stage + self.top_block.num_levels):
+                self._out_feature_strides["p{}".format(i + 1)] = 2 ** (i + 1)
 
         self._out_features = list(self._out_feature_strides.keys())
         self._out_feature_channels = {
@@ -643,12 +601,14 @@ class FPN(Backbone):
 
     @property
     def size_divisibility(self):
+        """Get size divisibility property."""
         return self._size_divisibility
 
-    def forward(self, input):
+    # pylint: disable=arguments-differ
+    def forward(self, _input):
         """
         Args:
-            input (dict[str->Tensor]): mapping feature map name (e.g., "res5") to
+            _input (dict[str->Tensor]): mapping feature map name (e.g., "res5") to
                 feature map tensor for each feature level in high to low resolution order.
 
         Returns:
@@ -659,30 +619,24 @@ class FPN(Backbone):
                 ["p2", "p3", ..., "p6"].
         """
         # Reverse feature maps into top-down order (from low to high resolution)
-        x = [input[f] for f in self.in_features[::-1]]
+        out = [_input[f] for f in self.in_features[::-1]]
         results = []
-        prev_features = self.lateral_convs[0](x[0])
+        prev_features = self.lateral_convs[0](out[0])
         results.append(self.output_convs[0](prev_features))
         for features, lateral_conv, output_conv in zip(
-            x[1:], self.lateral_convs[1:], self.output_convs[1:]
+            out[1:], self.lateral_convs[1:], self.output_convs[1:]
         ):
             top_down_features = F.interpolate(prev_features, scale_factor=2,
                                               mode="bilinear",
                                               align_corners=True)
             lateral_features = lateral_conv(features)
-            # lateral_features = F.interpolate(lateral_features,
-            #                                  size=top_down_features.size(
-            #                                  )[-2:],
-            #                                  mode="nearest")
-            # print(lateral_features.shape,
-            #       top_down_features.shape, prev_features.shape)
             prev_features = lateral_features + top_down_features
             if self._fuse_type == "avg":
                 prev_features /= 2
             results.insert(0, output_conv(prev_features))
 
         if self.top_block is not None:
-            top_block_in_feature = input.get(
+            top_block_in_feature = _input.get(
                 self.top_block.in_feature, None)
             if top_block_in_feature is None:
                 top_block_in_feature = results[self._out_features.index(
@@ -710,58 +664,76 @@ def _assert_strides_are_log2_contiguous(strides):
         )
 
 
-def get_gt_contours(targets, image_sizes, num_classes):
-    batch_size = len(targets)
-    contours = []
-    for target_im, size in zip(targets, image_sizes):
+# pylint: disable=too-many-locals
+def get_gt(instances, image_sizes, num_classes):
+    """Get ground truth for contours, offsets.
+
+    Args:
+        instances ([list]): [ground truth instances.]
+        image_sizes ([list]): [list of sizes of different images.]
+        num_classes ([int]): [number of contour classes. (instance classes)]
+
+    Returns:
+        [list]: [list of contour groundtruth images.]
+        [list]: [list of center regression groundtruth images.]
+    """
+    contours, offsets = [], []
+    for instance_im, size in zip(instances, image_sizes):
         contour_im = np.zeros((num_classes, size[0], size[1]),
                               dtype=np.uint8).squeeze()
+        offset_im = np.zeros((3, size[0], size[1]),
+                             dtype=np.float32).squeeze()
         img = np.zeros((size[0], size[1]))
         # no gt
-        if not target_im.has('gt_masks'):
+        if not instance_im.has('gt_masks'):
+            # pylint: disable=no-member
             contours.append(torch.from_numpy(contour_im))
+            offsets.append(torch.from_numpy(offset_im))
             continue
 
-        bboxes = target_im.gt_boxes.tensor
-        labels = target_im.gt_classes
-        masks = target_im.gt_masks
+        bboxes = instance_im.gt_boxes.tensor
+        labels = instance_im.gt_classes
+        masks = instance_im.gt_masks
 
         for mask, bbox, label in zip(masks, bboxes, labels):
+            bit_mask = mask.cpu().numpy().astype(np.uint8)
             bbox = bbox.cpu().numpy().astype(np.uint16)
-            x1, y1, x2, y2 = bbox
-            h, w = y2 - y1, x2 - x1
-            merged_cnts = []
-            # polygon = copy.deepcopy(polygon)
-            # for p in polygon:
-            #     p[0::2] = p[0::2] - bbox[0]
-            #     p[1::2] = p[1::2] - bbox[1]
-            # bit_mask = polygons_to_bitmask(polygon, h, w)
-            # bit_mask = bit_mask.astype(np.uint8)
-            bit_mask = mask.cpu().numpy().astype(np.uint8)[y1:y2, x1:x2]
-            cnts, _ = cv2.findContours(bit_mask, cv2.RETR_TREE,
-                                       cv2.CHAIN_APPROX_SIMPLE)
+            xmin, ymin, xmax, ymax = bbox
+            bit_mask_cropped = bit_mask[ymin:ymax, xmin:xmax]
+            height, width = ymax - ymin, xmax - xmin
+            offset_cropped = np.zeros((3, height, width),
+                                      dtype=np.float32)
+            g_w, g_h = np.meshgrid(np.arange(width), np.arange(height))
+            x_s, y_s = np.nonzero(bit_mask_cropped)
+            c_x, c_y = np.mean(x_s), np.mean(y_s)
+            weight = 100/((np.min((np.sum(bit_mask_cropped), 99))+1))
+            offset_cropped[0] = (g_h - c_x)*bit_mask_cropped
+            offset_cropped[1] = (g_w - c_y)*bit_mask_cropped
+            offset_cropped[2] = weight*bit_mask_cropped
+
+            # pylint: disable=no-member
+            cnts, _ = cv2.findContours(
+                bit_mask_cropped, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
             if len(cnts) == 0:
                 continue
-            # elif len(cnts) == 1:
-            #     merged_cnts = cnts
-            # else:
-            #     for cnt in cnts:
-            #         merged_cnts.extend(cnt) 
-            #     merged_cnts = [np.array(merged_cnts)]
-            #     merged_cnts = np.sort(merged_cnts, axis=0)[::-1]
             if num_classes == 1:
-                contour_im[y1:y2, x1:x2] = cv2.drawContours(
-                    img[y1:y2, x1:x2], cnts, -1, 1, 2)
+                contour_im[ymin:ymax, xmin:xmax] = cv2.drawContours(
+                    img[ymin:ymax, xmin:xmax], cnts, -1, 1, 2)
             else:
-                contour_im[label, y1:y2, x1:x2] = cv2.drawContours(
-                    img[y1:y2, x1:x2], cnts, -1, 1, 2)
+                contour_im[label, ymin:ymax, xmin:xmax] = cv2.drawContours(
+                    img[ymin:ymax, xmin:xmax], cnts, -1, 1, 2)
+
+            offset_im[:, ymin:ymax, xmin:xmax] = offset_cropped
+        # pylint: disable=no-member
         contours.append(torch.from_numpy(contour_im).float())
-    return contours
+        offsets.append(torch.from_numpy(offset_im))
+    return contours, offsets
 
 
 def combine_seg_contour_targets(gt_seg, gt_contours):
+    """Combine semantic segmentation and contour ground truth."""
     if len(gt_contours.shape) < 4:
-            gt_contours = gt_contours.unsqueeze(1)
+        gt_contours = gt_contours.unsqueeze(1)
     num_instance_classes = gt_contours.size()[1]
     combined_targets = gt_seg.clone()
     for i in range(num_instance_classes):

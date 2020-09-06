@@ -1,4 +1,4 @@
-# Copyright (c) Youngwan Lee (ETRI) All Rights Reserved.
+"""Default config for contour project."""
 from detectron2.config.defaults import _C
 from detectron2.config import CfgNode as CN
 
@@ -23,6 +23,19 @@ _C.MODEL.FPN_BLOCK.COMMON_STRIDE = 4
 _C.MODEL.FPN_BLOCK.NORM = "GN"
 
 # ---------------------------------------------------------------------------- #
+# HED Decoder
+# ---------------------------------------------------------------------------- #
+_C.MODEL.HED_DECODER = CN()
+_C.MODEL.HED_DECODER.NAME = "HedDecoder"
+_C.MODEL.HED_DECODER.IN_FEATURES = ["res2", "res3", "res4", "res5"]
+_C.MODEL.HED_DECODER.LOSS_WEIGHT = 1.0
+_C.MODEL.HED_DECODER.NUM_CLASSES = 1  # 9  # (8 Stuff + 1 background)
+_C.MODEL.HED_DECODER.HUBER_ACTIVE = True
+_C.MODEL.HED_DECODER.DICE_ACTIVE = False
+_C.MODEL.HED_DECODER.NORM = ""
+_C.MODEL.HED_DECODER.RES5_SUPERVISION = False
+
+# ---------------------------------------------------------------------------- #
 # Semantic Segmentation Head
 # ---------------------------------------------------------------------------- #
 _C.MODEL.SEM_SEG_HEAD = CN()
@@ -36,25 +49,7 @@ _C.MODEL.SEM_SEG_HEAD.IGNORE_VALUE = 255
 # ---------------------------------------------------------------------------- #
 _C.MODEL.CENTER_REG_HEAD = CN()
 _C.MODEL.CENTER_REG_HEAD.NAME = "CenterRegHead"
-_C.MODEL.CENTER_REG_HEAD.CONVS_DIM = 128
-_C.MODEL.CENTER_REG_HEAD.LOSS_WEIGHT = 1.0
-_C.MODEL.CENTER_REG_HEAD.CONV_KERNEL_SIZE = 1
-_C.MODEL.CENTER_REG_HEAD.NORM = "GN"
-
-
-# ---------------------------------------------------------------------------- #
-# HED Head
-# ---------------------------------------------------------------------------- #
-_C.MODEL.HED_HEAD = CN()
-_C.MODEL.HED_HEAD.NAME = "HEDHead"
-_C.MODEL.HED_HEAD.IN_FEATURES = ["res2", "res3", "res4", "res5"]
-_C.MODEL.HED_HEAD.LOSS_WEIGHT = 1.0
-_C.MODEL.HED_HEAD.NUM_CLASSES = 1  # 9  # (8 Stuff + 1 background)
-_C.MODEL.HED_HEAD.HUBER_ACTIVE = True
-_C.MODEL.HED_HEAD.DICE_ACTIVE = False
-_C.MODEL.HED_HEAD.NORM = ""
-_C.MODEL.HED_HEAD.RES5_SUPERVISION = False
-
+_C.MODEL.CENTER_REG_HEAD.LOSS_WEIGHT = 0.5
 
 # ---------------------------------------------------------------------------- #
 # Contour Head
@@ -65,8 +60,6 @@ _C.MODEL.CONTOUR_HEAD.LOSS_WEIGHT = 1.0
 _C.MODEL.CONTOUR_HEAD.NUM_CLASSES = 1  # 9  # (8 Stuff + 1 background)
 _C.MODEL.CONTOUR_HEAD.HUBER_ACTIVE = True
 _C.MODEL.CONTOUR_HEAD.DICE_ACTIVE = False
-_C.MODEL.CONTOUR_HEAD.NORM = "GN"
-
 
 # ---------------------------------------------------------------------------- #
 # Semantic with Instance Head
@@ -95,3 +88,12 @@ _C.MODEL.CONTOUR_NET.COMBINE.OVERLAP_THRESH = 0.5
 _C.MODEL.CONTOUR_NET.COMBINE.STUFF_AREA_LIMIT = 4096
 _C.MODEL.CONTOUR_NET.COMBINE.INSTANCES_CONFIDENCE_THRESH = 0.5
 _C.MODEL.CONTOUR_NET.LOSS_COMBINATION = 'fixed'  # uncertainty
+
+
+def get_cfg():
+    """Get a copy of the default config.
+
+    Returns:
+        a detectron2 CfgNode instance.
+    """
+    return _C.clone()

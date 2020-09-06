@@ -1,15 +1,15 @@
+"""Postprocessing utilities."""
 from torch.nn import functional as F
 import numpy as np
 import cv2
 from scipy import ndimage as nd
 import torch
-from detectron2.layers import paste_masks_in_image
 from detectron2.structures import Instances
-from detectron2.utils.memory import retry_if_cuda_oom
-import matplotlib.pyplot as plt
 
 
-def contour_postprocess(seg_results, contour_results, img_size,
+# pylint: disable=too-many-arguments
+def contour_postprocess(seg_results, contour_results,
+                        center_reg_results, img_size,
                         output_height, output_width,
                         num_classes, conf_thresh=0.5):
     """
@@ -31,57 +31,65 @@ def contour_postprocess(seg_results, contour_results, img_size,
         Instances: the resized output from the model, based on the output resolution
     """
     seg_results = crop_resize(seg_results, img_size,
-                        output_height, output_width)
-    if len(contour_results.shape) <3:
+                              output_height, output_width)
+    center_reg_results = crop_resize(center_reg_results, img_size,
+                                     output_height, output_width)
+    if len(contour_results.shape) < 3:
         contour_results = contour_results.unsqueeze(0).float()
     contour_results = crop_resize(contour_results, img_size,
-                        output_height, output_width)
-    # contour_results = F.interpolate(contour_results.unsqueeze(0),
-    #                                 size=(output_height, output_width),
-    #                                 mode="bilinear",
-    #                                 align_corners=True).squeeze()
-    results, contours = get_instances(seg_results, contour_results,
-                                      num_classes, conf_thresh)
-    results = Instances((output_height, output_width), **results.get_fields())
-    return results, contours
+                                  output_height, output_width)
+    seg, instances, contours, offsets = get_instances(seg_results, contour_results,
+                                                      center_reg_results,
+                                                      num_classes, conf_thresh)
+    instances = Instances((output_height, output_width),
+                          **instances.get_fields())
+    return seg, instances, contours, offsets
+
 
 def crop_resize(result, img_size, output_height, output_width):
-    result = result[:, : img_size[0], : img_size[1]].expand(1, -1, -1, -1)
+    """Crop and Resize the input feature map."""
+    if len(result.shape) == 3:
+        result = result[:, : img_size[0], : img_size[1]].expand(1, -1, -1, -1)
     result = F.interpolate(
         result, size=(output_height, output_width), mode="bilinear", align_corners=False
     )
     return result.squeeze()
 
 
-def get_instances(semantic_results, contour_results, num_classes, conf_thresh):
-    seg = semantic_results.argmax(dim=0).cpu().numpy()
+def get_instances(semantic_results, contour_results, center_reg_results, num_classes, conf_thresh):
+    """Get instances from results."""
+    seg = semantic_results.argmax(dim=0).detach().cpu().numpy()
+    offsets = center_reg_results.detach().cpu().numpy()
     mask = (seg >= 11).astype(np.uint8)
-    # if num_classes == 1:
+    # pylint: disable=no-member
     contours = (torch.sigmoid(contour_results) >
                 conf_thresh).squeeze().int().cpu().numpy()
-    # else:
-    # contours = contour_results.argmax(dim=0).cpu().numpy()
-    instance_img = get_instance_from_contour(seg, mask, contours, num_classes)
-    instances = get_instance_result(instance_img.squeeze(),
-                                    semantic_results[11:])
 
-    return instances, contours
+    instance_img = get_instance_img(seg, mask, contours, num_classes)
+    instances = get_instance_result_from_img(instance_img.squeeze(),
+                                             semantic_results[11:])
+
+    return seg, instances, contours, offsets
 
 
-def get_instance_result(instance_img, semantic_results):
+def get_instance_result_from_img(instance_img, semantic_results):
+    """Get instance result from instance image."""
     semantic_results = F.softmax(semantic_results, dim=0)
     unique_instances = torch.unique(instance_img)[1:]
     n_instances = len(unique_instances)
+    # pylint: disable=no-member
     pred_masks = torch.zeros((n_instances,) + instance_img.size())
+    # pylint: disable=no-member
     pred_classes = torch.zeros((n_instances,)).int()
+    # pylint: disable=no-member
     scores = torch.zeros((n_instances,))
-    semantic_maps = {i: semantic_map for i,
-                     semantic_map in enumerate(semantic_results)}
     for i, instance_id in enumerate(unique_instances):
         mask = (instance_img == instance_id)
+        # pylint: disable=no-member
         area = torch.sum(mask)
         label = int(instance_id // 1000 - 11)
-        score = torch.sum(semantic_maps[label][mask])/area
+        # pylint: disable=no-member
+        score = torch.sum(semantic_results[label][mask])/area
         pred_classes[i] = label
         pred_masks[i] = mask
         scores[i] = score
@@ -92,19 +100,14 @@ def get_instance_result(instance_img, semantic_results):
     return instances
 
 
-def get_instance_from_contour(seg, mask, contours, num_classes):
+# pyltin: disable=too-many-instance-attributes,no-member
+def get_instance_img(seg, mask, contours, num_classes):
+    """Get instance image from contours and segmentation output."""
     inst = np.zeros_like(seg)
     inst_from_seg = np.zeros_like(seg)
-    # for i in np.unique(seg):
-    #     if i < 11:
-    #         continue
-    #     _, inst_ = cv2.connectedComponents(((seg == i)*mask).astype(np.uint8))
-    #     inst_from_seg += inst_
-    for i in range(num_classes):
-        # if i == 0:
-        #     continue
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
 
+    for i in range(num_classes):
+        # pylint: disable=no-member
         if num_classes == 1:
             _, inst_from_seg = cv2.connectedComponents(
                 (seg >= 11).astype(np.uint8))
@@ -116,27 +119,19 @@ def get_instance_from_contour(seg, mask, contours, num_classes):
             inst_mask = (seg == (11 + i)).astype(np.uint8)
             contour_ = (contours[i] == 1).astype(np.uint8)
 
-        # contour = cv2.morphologyEx(contour_, cv2.MORPH_CLOSE, kernel)
-        contour = contour_
-        diff = inst_from_seg * inst_mask * (1 - contour)
-        # diff = (1 - contour)
+        diff = inst_from_seg * inst_mask * (1 - contour_)
+        # pylint: disable=no-member
         _, labels = cv2.connectedComponents(diff.astype(np.uint8))
         labels = fill(labels, (labels == 0)) * mask
-        inst += (seg * inst_mask * 1000 + labels*inst_mask) # + inst_from_seg)
-        # axis = plt.subplots(3, 2)[-1]
-        # axis[0, 0].imshow(to_rgb(seg))
-        # axis[0, 1].imshow(mask)
-        # axis[1, 0].imshow(to_rgb(inst_from_seg))
-        # axis[1, 1].imshow(contour_)
-        # axis[2, 0].imshow(contour)
-        # axis[2, 1].imshow(to_rgb(inst))
-        # plt.show()
+        inst += (seg * inst_mask * 1000 + labels*inst_mask)
+
     for i in np.unique(inst):
         mask_ = (inst == i).astype(np.uint8)
         area = np.sum(mask_)
         if area < 500:
             inst[inst == i] = 0
     inst = fill(inst, (inst == 0)) * mask
+    # pylint: disable=no-member
     return torch.from_numpy(inst)
 
 
@@ -164,6 +159,7 @@ def fill(data, invalid=None):
 
 
 def to_rgb(bw_im):
+    """Convert instances to rgb."""
     instances = np.unique(bw_im)
     instances = instances[instances != 0]
     rgb_im = [np.zeros(bw_im.shape, dtype=int),

@@ -6,12 +6,12 @@
   - [x] Add Contour Head branching from FPN Block. [Done]
   - [x] Add Dice to contour losses. [Done]
   - [x] Add Cityscapes panoptic evaluator. [Done]
-  - [ ] Add demo scripts that includes visualization for : [Sep-06]
+  - [ ] Merge close contours [Sep-06]
+  - [ ] Add demo scripts that includes visualization for : [Sep-07]
     - [ ] semantic segmentation 
     - [ ] contour estimation
     - [ ] instance segmentation 
     - [ ] panoptic segmentation
-  - [ ] Merge close contours [Sep-07]
   - [ ] Add loss mask. Dilated with 5 pixels [Sep-08]
   - [ ] Add support for COCO by generalizing postprocessing. [Sep-10]
 

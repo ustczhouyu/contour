@@ -1,57 +1,73 @@
-# Adapted from https://github.com/facebookresearch/detectron2/blob/master/detectron2/evaluation/cityscapes_evaluation.py
+"""Cityscapes Evaluator Script.
+
+Adapted from: https://github.com/facebookresearch/detectron2/
+              blob/master/detectron2/evaluation/cityscapes_evaluation.py
+"""
+import contextlib
 import glob
-import logging
-import numpy as np
-import os
 import io
 import itertools
-from tabulate import tabulate
 import json
+import logging
+import os
 import tempfile
-import contextlib
 from collections import OrderedDict
+
+import numpy as np
 import torch
-from fvcore.common.file_io import PathManager
-from PIL import Image
-
+from cityscapesscripts.evaluation.evalPanopticSemanticLabeling import \
+    evaluatePanoptic
+from cityscapesscripts.helpers.labels import name2label, trainId2label
 from detectron2.data import MetadataCatalog
-from detectron2.utils import comm
-
 from detectron2.evaluation.evaluator import DatasetEvaluator
+from detectron2.utils import comm
+from fvcore.common.file_io import PathManager
+from panopticapi.utils import id2rgb
+from PIL import Image
+from tabulate import tabulate
 
 
 class CityscapesEvaluator(DatasetEvaluator):
-    """
-    Base class for evaluation using cityscapes API.
-    """
+    """Base class for evaluation using cityscapes API."""
 
     def __init__(self, dataset_name):
-        """
+        """Intialize the evaluator.
+
         Args:
             dataset_name (str): the name of the dataset.
                 It must have the following metadata associated with it:
                 "thing_classes", "gt_dir".
         """
         self._metadata = MetadataCatalog.get(dataset_name)
+        # pylint: disable=no-member
         self._cpu_device = torch.device("cpu")
         self._logger = logging.getLogger(__name__)
+        self._working_dir = None
+        self._temp_dir = None
+        self._predictions = None
 
     def reset(self):
-        self._working_dir = tempfile.TemporaryDirectory(prefix="cityscapes_eval_")
+        """Reset evaluator."""
+        self._predictions = None
+        self._working_dir = tempfile.TemporaryDirectory(
+            prefix="cityscapes_eval_")
         self._temp_dir = self._working_dir.name
         # All workers will write to the same results directory
+        # pylint: disable=fixme
         # TODO this does not work in distributed training
         self._temp_dir = comm.all_gather(self._temp_dir)[0]
         if self._temp_dir != self._working_dir.name:
             self._working_dir.cleanup()
+        # pylint: disable=logging-format-interpolation
         self._logger.info(
-            "Writing cityscapes results to temporary directory {} ...".format(self._temp_dir)
+            "Writing cityscapes results to temporary directory {} ...".format(
+                self._temp_dir)
         )
 
 
+# pylint: disable=too-many-locals
 class CityscapesInstanceEvaluator(CityscapesEvaluator):
-    """
-    Evaluate instance segmentation results using cityscapes API.
+    """Evaluate instance segmentation results using cityscapes API.
 
     Note:
         * It does not work in multi-machine distributed training.
@@ -60,14 +76,13 @@ class CityscapesInstanceEvaluator(CityscapesEvaluator):
     """
 
     def process(self, inputs, outputs):
-        from cityscapesscripts.helpers.labels import name2label
-
-        for input, output in zip(inputs, outputs):
-            file_name = input["file_name"]
+        """Prepare the inputs and outputs for metric evaluation."""
+        for _input, _output in zip(inputs, outputs):
+            file_name = _input["file_name"]
             basename = os.path.splitext(os.path.basename(file_name))[0]
             pred_txt = os.path.join(self._temp_dir, basename + "_pred.txt")
 
-            output = output["instances"].to(self._cpu_device)
+            output = _output["instances"].to(self._cpu_device)
             num_instances = len(output)
             with open(pred_txt, "w") as fout:
                 for i in range(num_instances):
@@ -77,23 +92,30 @@ class CityscapesInstanceEvaluator(CityscapesEvaluator):
                     score = output.scores[i]
                     mask = output.pred_masks[i].numpy().astype("uint8")
                     png_filename = os.path.join(
-                        self._temp_dir, basename + "_{}_{}.png".format(i, classes)
+                        self._temp_dir, basename +
+                        "_{}_{}.png".format(i, classes)
                     )
 
                     Image.fromarray(mask * 255).save(png_filename)
-                    fout.write("{} {} {}\n".format(os.path.basename(png_filename), class_id, score))
+                    fout.write("{} {} {}\n".format(
+                        os.path.basename(png_filename), class_id, score))
 
+    # pylint: disable=inconsistent-return-statements
     def evaluate(self):
-        """
+        """Evaluate the predictions and compute results.
+
         Returns:
             dict: has a key "segm", whose value is a dict of "AP" and "AP50".
         """
         comm.synchronize()
         if comm.get_rank() > 0:
             return
+        # pylint: disable=import-outside-toplevel
         import cityscapesscripts.evaluation.evalInstanceLevelSemanticLabeling as cityscapes_eval
 
-        self._logger.info("Evaluating results under {} ...".format(self._temp_dir))
+        # pylint: disable=logging-format-interpolation
+        self._logger.info(
+            "Evaluating results under {} ...".format(self._temp_dir))
 
         # set some global states in cityscapes evaluation API, before evaluating
         cityscapes_eval.args.predictionPath = os.path.abspath(self._temp_dir)
@@ -101,23 +123,28 @@ class CityscapesInstanceEvaluator(CityscapesEvaluator):
         cityscapes_eval.args.JSONOutput = False
         cityscapes_eval.args.colorized = False
         cityscapes_eval.args.distanceAvailable = True
-        cityscapes_eval.args.gtInstancesFile = os.path.join(self._temp_dir, "gtInstances.json")
+        cityscapes_eval.args.gtInstancesFile = os.path.join(
+            self._temp_dir, "gtInstances.json")
 
         # These lines are adopted from
-        # https://github.com/mcordts/cityscapesScripts/blob/master/cityscapesscripts/evaluation/evalInstanceLevelSemanticLabeling.py # noqa
+        # https://github.com/mcordts/cityscapesScripts/blob/master/
+        # cityscapesscripts/evaluation/evalInstanceLevelSemanticLabeling.py # noqa
         gt_dir = PathManager.get_local_path(self._metadata.gt_dir)
-        groundTruthImgList = glob.glob(os.path.join(gt_dir, "*", "*_gtFine_instanceIds.png"))
+        ground_truth_img_list = glob.glob(os.path.join(
+            gt_dir, "*", "*_gtFine_instanceIds.png"))
+        # pylint: disable=len-as-condition
         assert len(
-            groundTruthImgList
+            ground_truth_img_list
         ), "Cannot find any ground truth images to use for evaluation. Searched for: {}".format(
             cityscapes_eval.args.groundTruthSearch
         )
-        predictionImgList = []
-        for gt in groundTruthImgList:
-            predictionImgList.append(cityscapes_eval.getPrediction(gt, cityscapes_eval.args))
-        results = cityscapes_eval.evaluateImgLists(
-            predictionImgList, groundTruthImgList, cityscapes_eval.args
-        )["averages"]
+        prediction_img_list = []
+        for ground_truth in ground_truth_img_list:
+            prediction_img_list.append(cityscapes_eval.getPrediction(ground_truth,
+                                                                     cityscapes_eval.args))
+        results = cityscapes_eval.evaluateImgLists(prediction_img_list,
+                                                   ground_truth_img_list,
+                                                   cityscapes_eval.args)["averages"]
 
         ret = OrderedDict()
         ret["segm"] = {"AP": results["allAp"] * 100,
@@ -130,8 +157,7 @@ class CityscapesInstanceEvaluator(CityscapesEvaluator):
 
 
 class CityscapesSemSegEvaluator(CityscapesEvaluator):
-    """
-    Evaluate semantic segmentation results using cityscapes API.
+    """Evaluate semantic segmentation results using cityscapes API.
 
     Note:
         * It does not work in multi-machine distributed training.
@@ -140,14 +166,15 @@ class CityscapesSemSegEvaluator(CityscapesEvaluator):
     """
 
     def process(self, inputs, outputs):
-        from cityscapesscripts.helpers.labels import trainId2label
-
-        for input, output in zip(inputs, outputs):
-            file_name = input["file_name"]
+        """Prepare the inputs and outputs for metric evaluation."""
+        for _input, _output in zip(inputs, outputs):
+            file_name = _input["file_name"]
             basename = os.path.splitext(os.path.basename(file_name))[0]
-            pred_filename = os.path.join(self._temp_dir, basename + "_pred.png")
+            pred_filename = os.path.join(
+                self._temp_dir, basename + "_pred.png")
 
-            output = output["sem_seg"].argmax(dim=0).to(self._cpu_device).numpy()
+            output = _output["sem_seg"].argmax(
+                dim=0).to(self._cpu_device).numpy()
             pred = 255 * np.ones(output.shape, dtype=np.uint8)
             for train_id, label in trainId2label.items():
                 if label.ignoreInEval:
@@ -155,15 +182,20 @@ class CityscapesSemSegEvaluator(CityscapesEvaluator):
                 pred[output == train_id] = label.id
             Image.fromarray(pred).save(pred_filename)
 
+    # pylint: disable=inconsistent-return-statements
     def evaluate(self):
+        """Evaluate the predictions and compute results."""
         comm.synchronize()
         if comm.get_rank() > 0:
             return
         # Load the Cityscapes eval script *after* setting the required env var,
         # since the script reads CITYSCAPES_DATASET into global variables at load time.
+        # pylint: disable=import-outside-toplevel
         import cityscapesscripts.evaluation.evalPixelLevelSemanticLabeling as cityscapes_eval
 
-        self._logger.info("Evaluating results under {} ...".format(self._temp_dir))
+        # pylint: disable=logging-format-interpolation
+        self._logger.info(
+            "Evaluating results under {} ...".format(self._temp_dir))
 
         # set some global states in cityscapes evaluation API, before evaluating
         cityscapes_eval.args.predictionPath = os.path.abspath(self._temp_dir)
@@ -172,20 +204,24 @@ class CityscapesSemSegEvaluator(CityscapesEvaluator):
         cityscapes_eval.args.colorized = False
 
         # These lines are adopted from
-        # https://github.com/mcordts/cityscapesScripts/blob/master/cityscapesscripts/evaluation/evalPixelLevelSemanticLabeling.py # noqa
+        # https://github.com/mcordts/cityscapesScripts/blob/master/
+        # cityscapesscripts/evaluation/evalPixelLevelSemanticLabeling.py # noqa
         gt_dir = PathManager.get_local_path(self._metadata.gt_dir)
-        groundTruthImgList = glob.glob(os.path.join(gt_dir, "*", "*_gtFine_labelIds.png"))
+        ground_truth_img_list = glob.glob(
+            os.path.join(gt_dir, "*", "*_gtFine_labelIds.png"))
+        # pylint: disable=len-as-condition
         assert len(
-            groundTruthImgList
+            ground_truth_img_list
         ), "Cannot find any ground truth images to use for evaluation. Searched for: {}".format(
             cityscapes_eval.args.groundTruthSearch
         )
-        predictionImgList = []
-        for gt in groundTruthImgList:
-            predictionImgList.append(cityscapes_eval.getPrediction(cityscapes_eval.args, gt))
-        results = cityscapes_eval.evaluateImgLists(
-            predictionImgList, groundTruthImgList, cityscapes_eval.args
-        )
+        prediction_img_list = []
+        for ground_truth in ground_truth_img_list:
+            prediction_img_list.append(cityscapes_eval.getPrediction(cityscapes_eval.args,
+                                                                     ground_truth))
+        results = cityscapes_eval.evaluateImgLists(prediction_img_list,
+                                                   ground_truth_img_list,
+                                                   cityscapes_eval.args)
         ret = OrderedDict()
         ret["sem_seg"] = {
             "IoU": 100.0 * results["averageScoreClasses"],
@@ -198,15 +234,10 @@ class CityscapesSemSegEvaluator(CityscapesEvaluator):
 
 
 class CityscapesPanopticEvaluator(CityscapesEvaluator):
-    """
-    Evaluate Panoptic Quality metrics on Cityscapes using cityscapesscripts.
-    """        
-
-    def reset(self):
-        self._predictions = []
+    """Evaluate Panoptic Quality metrics on Cityscapes using cityscapesscripts."""
 
     def _convert_category_id(self, segment_info):
-        from cityscapesscripts.helpers.labels import name2label
+        """Convert stuff/thing id to cityscapes category id."""
         isthing = segment_info.pop("isthing", None)
         if isthing is None:
             # the model produces panoptic category id directly. No more conversion needed
@@ -219,20 +250,20 @@ class CityscapesPanopticEvaluator(CityscapesEvaluator):
         return segment_info
 
     def process(self, inputs, outputs):
-        from panopticapi.utils import id2rgb
-
-        for input, output in zip(inputs, outputs):
-            panoptic_img, segments_info = output["panoptic_seg"]
+        """Prepare the inputs and outputs for metric evaluation."""
+        for _input, _output in zip(inputs, outputs):
+            panoptic_img, segments_info = _output["panoptic_seg"]
             panoptic_img = panoptic_img.cpu().numpy()
 
-            file_name = input["file_name"]
+            file_name = _input["file_name"]
             file_name = os.path.splitext(os.path.basename(file_name))[0]
             image_id = '_'.join(file_name.split('_')[:-1])
             pred_filename = image_id + "_pred.png"
 
             with io.BytesIO() as out:
                 Image.fromarray(id2rgb(panoptic_img)).save(out, format="PNG")
-                segments_info = [self._convert_category_id(x) for x in segments_info]
+                segments_info = [self._convert_category_id(
+                    x) for x in segments_info]
                 self._predictions.append(
                     {
                         "image_id": image_id,
@@ -242,7 +273,9 @@ class CityscapesPanopticEvaluator(CityscapesEvaluator):
                     }
                 )
 
+    # pylint: disable=inconsistent-return-statements
     def evaluate(self):
+        """Evaluate the predictions and compute results."""
         comm.synchronize()
         self._predictions = comm.gather(self._predictions)
         self._predictions = list(itertools.chain(*self._predictions))
@@ -254,25 +287,28 @@ class CityscapesPanopticEvaluator(CityscapesEvaluator):
         gt_folder = PathManager.get_local_path(self._metadata.panoptic_root)
 
         with tempfile.TemporaryDirectory(prefix="panoptic_eval") as pred_dir:
-            self._logger.info("Writing all panoptic predictions to {} ...".format(pred_dir))
-            for p in self._predictions:
-                with open(os.path.join(pred_dir, p["file_name"]), "wb") as f:
-                    f.write(p.pop("png_string"))
+            # pylint: disable=logging-format-interpolation
+            self._logger.info(
+                "Writing all panoptic predictions to {} ...".format(pred_dir))
+            for prediction in self._predictions:
+                with open(os.path.join(pred_dir, prediction["file_name"]), "wb") as file:
+                    file.write(prediction.pop("png_string"))
 
-            with open(gt_json, "r") as f:
-                json_data = json.load(f)
+            with open(gt_json, "r") as file:
+                json_data = json.load(file)
             json_data["annotations"] = self._predictions
-            predictions_json = os.path.join(pred_dir, "cityscapes_panoptic_val.json")
-            results_json = os.path.join(pred_dir, "resultPanopticSemanticLabeling.json")
-            with PathManager.open(predictions_json, "w") as f:
-                f.write(json.dumps(json_data))
-
-            from cityscapesscripts.evaluation.evalPanopticSemanticLabeling import evaluatePanoptic
+            predictions_json = os.path.join(
+                pred_dir, "cityscapes_panoptic_val.json")
+            results_json = os.path.join(
+                pred_dir, "resultPanopticSemanticLabeling.json")
+            with PathManager.open(predictions_json, "w") as file:
+                file.write(json.dumps(json_data))
 
             with contextlib.redirect_stdout(io.StringIO()):
                 pq_res = evaluatePanoptic(
                     gt_json,
-                    pred_json_file=PathManager.get_local_path(predictions_json),
+                    pred_json_file=PathManager.get_local_path(
+                        predictions_json),
                     gt_folder=gt_folder,
                     pred_folder=pred_dir,
                     resultsFile=PathManager.get_local_path(results_json)
@@ -294,15 +330,17 @@ class CityscapesPanopticEvaluator(CityscapesEvaluator):
 
         return results
 
-
     def _print_panoptic_results(self, pq_res):
+        """Print panoptic results."""
         headers = ["", "PQ", "SQ", "RQ", "#categories"]
         data = []
         for name in ["All", "Things", "Stuff"]:
-            row = [name] + [pq_res[name][k] * 100 for k in ["pq", "sq", "rq"]] + [pq_res[name]["n"]]
+            row = [name] + [pq_res[name][k] *
+                            100 for k in ["pq", "sq", "rq"]] + [pq_res[name]["n"]]
             data.append(row)
         table = tabulate(
-            data, headers=headers, tablefmt="pipe", floatfmt=".3f", stralign="center", numalign="center"
+            data, headers=headers, tablefmt="pipe",
+            floatfmt=".3f", stralign="center", numalign="center"
         )
+        # pylint: disable=logging-not-lazy
         self._logger.info("Panoptic Evaluation Results:\n" + table)
-        
