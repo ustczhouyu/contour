@@ -35,7 +35,7 @@ class ContourNet(nn.Module):
                                  |--sem_seg_head--|
     Backbone--|--fpn--fpn_block--|--contour_head--|--postproc--instance--|
                                  |                                       |
-                                 |--center_reg_head------------|--merged instances
+                                 |--center_reg_head------------|--refine instances
     """
 
     def __init__(self, cfg):
@@ -166,7 +166,7 @@ class ContourNet(nn.Module):
                 sem_seg_losses, contour_losses, center_reg_losses)
             if self.vis_period > 0:
                 storage = get_event_storage()
-                if (storage.iter % self.vis_period == 0) and storage.iter >= 100:
+                if (storage.iter % self.vis_period == 0) and storage.iter >= 1000:
                     results = self.postprocess(images, sem_seg_results, contour_results,
                                                center_reg_results)
                     self.visualize_results(

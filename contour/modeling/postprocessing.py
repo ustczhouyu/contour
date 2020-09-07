@@ -74,9 +74,9 @@ def get_instances(semantic_results, contour_results,
 
     instance_img = get_instance_img(
         seg, mask, contours, offsets/offsets_scale, num_classes)
-    instance_img = instance_img.unsqueeze(0).unsqueeze(0).float()
-    instance_img = F.interpolate(instance_img, size=(
-        output_height, output_width), mode="nearest")
+    # instance_img = instance_img.unsqueeze(0).unsqueeze(0).float()
+    # instance_img = F.interpolate(instance_img, size=(
+    #     output_height, output_width), mode="nearest")
     semantic_results = crop_resize(
         semantic_results, img_size, output_height, output_width)
     instances = get_instance_result_from_img(
@@ -89,15 +89,20 @@ def get_instance_result_from_img(instance_img, semantic_results):
     """Get instance result from instance image."""
     semantic_results = F.softmax(semantic_results, dim=0)
     unique_instances = torch.unique(instance_img)[1:]
+    output_height, output_width = semantic_results.size()[1:]
     n_instances = len(unique_instances)
     # pylint: disable=no-member
-    pred_masks = torch.zeros((n_instances,) + instance_img.size())
+    pred_masks = torch.zeros((n_instances,) + (output_height, output_width))
     # pylint: disable=no-member
     pred_classes = torch.zeros((n_instances,)).int()
     # pylint: disable=no-member
     scores = torch.zeros((n_instances,))
     for i, instance_id in enumerate(unique_instances):
         mask = (instance_img == instance_id)
+        mask = mask.unsqueeze(0).unsqueeze(0).float()
+        mask = F.interpolate(mask, size=(
+            output_height, output_width), mode="bilinear",  align_corners=False)
+        mask = mask.squeeze().bool()
         # pylint: disable=no-member
         area = torch.sum(mask)
         label = int(instance_id // 1000 - 11)
@@ -145,9 +150,9 @@ def get_instance_img(seg, mask, contours, offsets, num_classes):
             inst[inst == i] = 0
     inst = refine_instances(inst, offsets)
     inst = fill(inst, (inst == 0)) * mask
-    inst[1010:, :] = 0
-    inst[:, :5] = 0
-    inst[:, -5:] = 0
+    inst[250:, :] = 0
+    inst[:, :1] = 0
+    inst[:, -2:] = 0
     # pylint: disable=no-member
     return torch.from_numpy(inst)
 
@@ -198,7 +203,7 @@ def split_instances(inst, offsets, cat_count):
         off_x, off_y = offsets[0], offsets[1]
         c_x, c_y = xsys[0] - off_x[xsys], xsys[1] - off_y[xsys]
         centroids = np.stack([c_x, c_y], axis=1)
-        db = DBSCAN(eps=25, min_samples=5).fit(centroids)
+        db = DBSCAN(eps=5, min_samples=5).fit(centroids)
         labels = db.labels_
         # Number of clusters in labels, ignoring noise if present.
         n_clusters_ = len(set(labels)) - (1 if -1 in labels else 0)
@@ -239,7 +244,7 @@ def merge_instances(inst, offsets):
     if len(instance_ids) == 1:
         return merge_inst
     centroids = np.array(list(centroid_dict.values()))
-    db = DBSCAN(eps=10, min_samples=1).fit(centroids)
+    db = DBSCAN(eps=5, min_samples=1).fit(centroids)
     labels = db.labels_
     seen = {}
 
