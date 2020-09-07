@@ -214,10 +214,10 @@ class ContourNet(nn.Module):
             height, width = image_size
             sem_seg_r = sem_seg_postprocess(
                 sem_seg_result, image_size, height, width)
-            sem_seg, instances, contours, offsets = contour_postprocess(
-                sem_seg_r, contour_result, center_reg_result,
+            instances, contours, offsets = contour_postprocess(
+                sem_seg_result, contour_result, center_reg_result,
                 image_size, height, width, self.contour_classes)
-            processed_results.append({"sem_seg": sem_seg,
+            processed_results.append({"sem_seg": sem_seg_r,
                                       "instances": instances,
                                       "contours": contours,
                                       "offsets": offsets})
@@ -298,8 +298,9 @@ class ContourNet(nn.Module):
         seg_anno_img = seg_anno_img.draw_sem_seg(sem_seg=seg_anno)
         seg_anno_img = seg_anno_img.get_image()
         seg_pred = Visualizer(img, self.metadata)
-        seg_pred = seg_pred.draw_sem_seg(
-            sem_seg=results[image_index]["sem_seg"])
+        sem_seg_result = results[image_index]["sem_seg"]
+        sem_seg_result = sem_seg_result.argmax(dim=0).detach().cpu().numpy()
+        seg_pred = seg_pred.draw_sem_seg(sem_seg=sem_seg_result)
         seg_pred = seg_pred.get_image()
         seg_vis_img = np.vstack((seg_anno_img, seg_pred))
         seg_vis_img = seg_vis_img.transpose(2, 0, 1)
@@ -319,7 +320,7 @@ class ContourNet(nn.Module):
         cont_gt = cont_gt.draw_contours(gt_contours[image_index].cpu())
         cont_gt = cont_gt.get_image()
         cont_pred = Visualizer(img, self.metadata)
-        cont_pred = cont_pred.draw_contours(results[image_index]["contours"])
+        cont_pred = cont_pred.draw_contours(results[image_index]["contours"].detach().cpu())
         cont_pred = cont_pred.get_image()
         cont_img = np.vstack((cont_gt, cont_pred))
         cont_img = cont_img.transpose(2, 0, 1)
@@ -331,7 +332,7 @@ class ContourNet(nn.Module):
             gt_offsets[image_index][:2, :, :].cpu())
         offset_gt = offset_gt.get_image()
         offset_pred = Visualizer(img, None)
-        offset_pred = offset_pred.draw_offsets(results[image_index]["offsets"])
+        offset_pred = offset_pred.draw_offsets(results[image_index]["offsets"].detach().cpu())
         offset_pred = offset_pred.get_image()
         offset_img = np.vstack((offset_gt, offset_pred))
         offset_img = offset_img.transpose(2, 0, 1)

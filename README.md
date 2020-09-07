@@ -6,7 +6,7 @@
   - [x] Add Contour Head branching from FPN Block. [Done]
   - [x] Add Dice to contour losses. [Done]
   - [x] Add Cityscapes panoptic evaluator. [Done]
-  - [ ] Merge close contours [Sep-06]
+  - [ ] Refine instance using center regression. [Sep-07]
   - [ ] Add demo scripts that includes visualization for : [Sep-07]
     - [ ] semantic segmentation 
     - [ ] contour estimation

@@ -1,10 +1,14 @@
 """Postprocessing utilities."""
-from torch.nn import functional as F
-import numpy as np
+import copy
+
 import cv2
-from scipy import ndimage as nd
+import numpy as np
 import torch
 from detectron2.structures import Instances
+from scipy import ndimage as nd
+from torch.nn import functional as F
+
+from sklearn.cluster import DBSCAN
 
 
 # pylint: disable=too-many-arguments
@@ -30,20 +34,20 @@ def contour_postprocess(seg_results, contour_results,
     Returns:
         Instances: the resized output from the model, based on the output resolution
     """
-    seg_results = crop_resize(seg_results, img_size,
-                              output_height, output_width)
-    center_reg_results = crop_resize(center_reg_results, img_size,
-                                     output_height, output_width)
+
     if len(contour_results.shape) < 3:
         contour_results = contour_results.unsqueeze(0).float()
-    contour_results = crop_resize(contour_results, img_size,
-                                  output_height, output_width)
-    seg, instances, contours, offsets = get_instances(seg_results, contour_results,
-                                                      center_reg_results,
-                                                      num_classes, conf_thresh)
+    instances, contours, offsets = get_instances(seg_results, contour_results,
+                                                 center_reg_results,
+                                                 num_classes, conf_thresh,
+                                                 img_size, output_height, output_width)
     instances = Instances((output_height, output_width),
                           **instances.get_fields())
-    return seg, instances, contours, offsets
+    offsets = crop_resize(center_reg_results, img_size,
+                          output_height, output_width)
+    contours = crop_resize(contour_results, img_size,
+                           output_height, output_width)
+    return instances, contours, offsets
 
 
 def crop_resize(result, img_size, output_height, output_width):
@@ -56,20 +60,29 @@ def crop_resize(result, img_size, output_height, output_width):
     return result.squeeze()
 
 
-def get_instances(semantic_results, contour_results, center_reg_results, num_classes, conf_thresh):
+def get_instances(semantic_results, contour_results,
+                  center_reg_results, num_classes, conf_thresh,
+                  img_size, output_height, output_width):
     """Get instances from results."""
     seg = semantic_results.argmax(dim=0).detach().cpu().numpy()
     offsets = center_reg_results.detach().cpu().numpy()
+    offsets_scale = (output_height//offsets.shape[1])
     mask = (seg >= 11).astype(np.uint8)
     # pylint: disable=no-member
     contours = (torch.sigmoid(contour_results) >
                 conf_thresh).squeeze().int().cpu().numpy()
 
-    instance_img = get_instance_img(seg, mask, contours, num_classes)
-    instances = get_instance_result_from_img(instance_img.squeeze(),
-                                             semantic_results[11:])
+    instance_img = get_instance_img(
+        seg, mask, contours, offsets/offsets_scale, num_classes)
+    instance_img = instance_img.unsqueeze(0).unsqueeze(0).float()
+    instance_img = F.interpolate(instance_img, size=(
+        output_height, output_width), mode="nearest")
+    semantic_results = crop_resize(
+        semantic_results, img_size, output_height, output_width)
+    instances = get_instance_result_from_img(
+        instance_img.squeeze(), semantic_results[11:])
 
-    return seg, instances, contours, offsets
+    return instances, contours, offsets
 
 
 def get_instance_result_from_img(instance_img, semantic_results):
@@ -101,7 +114,7 @@ def get_instance_result_from_img(instance_img, semantic_results):
 
 
 # pyltin: disable=too-many-instance-attributes,no-member
-def get_instance_img(seg, mask, contours, num_classes):
+def get_instance_img(seg, mask, contours, offsets, num_classes):
     """Get instance image from contours and segmentation output."""
     inst = np.zeros_like(seg)
     inst_from_seg = np.zeros_like(seg)
@@ -128,11 +141,115 @@ def get_instance_img(seg, mask, contours, num_classes):
     for i in np.unique(inst):
         mask_ = (inst == i).astype(np.uint8)
         area = np.sum(mask_)
-        if area < 500:
+        if area < 32:
             inst[inst == i] = 0
+    inst = refine_instances(inst, offsets)
     inst = fill(inst, (inst == 0)) * mask
+    inst[1010:, :] = 0
+    inst[:, :5] = 0
+    inst[:, -5:] = 0
     # pylint: disable=no-member
     return torch.from_numpy(inst)
+
+
+def refine_instances(inst, offsets):
+    """Merge and Split instances using offsets."""
+    inst = merge_instances(inst, offsets)
+    inst, cat_count = clean_instance_ids(inst)
+    inst = split_instances(inst, offsets, cat_count)
+    return inst
+
+
+def clean_instance_ids(inst):
+    """Clean instance ids."""
+    n_instances = np.unique(inst)
+    cat_count = {}
+    category_id, instance_id = 0, 0
+    for i in n_instances:
+        if i == 0:
+            continue
+        cat_id = i//1000
+        if cat_id != category_id:
+            cat_count[category_id] = instance_id
+            category_id = cat_id
+            instance_id = 1
+        else:
+            instance_id += 1
+        inst_id = category_id*1000 + instance_id
+        if i != inst_id:
+            inst[(inst == i)] = inst_id
+    cat_count[category_id] = instance_id
+    return inst, cat_count
+
+
+def split_instances(inst, offsets, cat_count):
+    """Split instances using offsets."""
+    n_instances = np.unique(inst)
+    for i in np.unique(inst):
+        if i == 0:
+            continue
+        category_id = i//1000
+        mask_ = (inst == i).astype(np.uint8)
+        area = np.sum(mask_)
+        # DBSCAN hangs/crashes with large data.
+        if area >= 10000:
+            continue
+        xsys = np.nonzero(mask_)
+        off_x, off_y = offsets[0], offsets[1]
+        c_x, c_y = xsys[0] - off_x[xsys], xsys[1] - off_y[xsys]
+        centroids = np.stack([c_x, c_y], axis=1)
+        db = DBSCAN(eps=25, min_samples=5).fit(centroids)
+        labels = db.labels_
+        # Number of clusters in labels, ignoring noise if present.
+        n_clusters_ = len(set(labels)) - (1 if -1 in labels else 0)
+        for i in range(1, n_clusters_):
+            idxs = np.argwhere(labels == i)
+            cat_count[category_id] += 1
+            instance_id = category_id*1000 + cat_count[category_id]
+            x_s, y_s = xsys[0][idxs], xsys[1][idxs]
+            inst[(x_s, y_s)] = instance_id
+
+    return inst
+
+
+def compute_centroid_dict(inst, offsets):
+    """Compute centroid dictionary."""
+    centroid_dict = {}
+    for i in np.unique(inst):
+        if i == 0:
+            continue
+        category_id = i//1000
+        mask_ = (inst == i).astype(np.uint8)
+        area = np.sum(mask_)
+        xsys = np.nonzero(mask_)
+        off_x, off_y = offsets[0], offsets[1]
+        c_x, c_y = np.mean(xsys[0] - off_x[xsys]
+                           ), np.mean(xsys[1] - off_y[xsys])
+        centroid_dict[i] = [c_x, c_y]
+    return centroid_dict
+
+
+def merge_instances(inst, offsets):
+    """Merge instances using offsets."""
+    merge_inst = copy.deepcopy(inst)
+    centroid_dict = compute_centroid_dict(inst, offsets)
+    if not centroid_dict:
+        return merge_inst
+    instance_ids = list(centroid_dict.keys())
+    if len(instance_ids) == 1:
+        return merge_inst
+    centroids = np.array(list(centroid_dict.values()))
+    db = DBSCAN(eps=10, min_samples=1).fit(centroids)
+    labels = db.labels_
+    seen = {}
+
+    for i, label in enumerate(labels):
+        if label not in seen:
+            seen[label] = instance_ids[i]
+            continue
+        merge_inst[inst == instance_ids[i]] = seen[label]
+
+    return merge_inst
 
 
 def fill(data, invalid=None):

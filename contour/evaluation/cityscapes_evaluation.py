@@ -44,11 +44,11 @@ class CityscapesEvaluator(DatasetEvaluator):
         self._logger = logging.getLogger(__name__)
         self._working_dir = None
         self._temp_dir = None
-        self._predictions = None
+        self._predictions = []
 
     def reset(self):
         """Reset evaluator."""
-        self._predictions = None
+        self._predictions = []
         self._working_dir = tempfile.TemporaryDirectory(
             prefix="cityscapes_eval_")
         self._temp_dir = self._working_dir.name
