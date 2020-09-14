@@ -49,7 +49,7 @@ _C.MODEL.SEM_SEG_HEAD.IGNORE_VALUE = 255
 # ---------------------------------------------------------------------------- #
 _C.MODEL.CENTER_REG_HEAD = CN()
 _C.MODEL.CENTER_REG_HEAD.NAME = "CenterRegHead"
-_C.MODEL.CENTER_REG_HEAD.LOSS_WEIGHT = 0.5
+_C.MODEL.CENTER_REG_HEAD.LOSS_WEIGHT = 0.25
 
 # ---------------------------------------------------------------------------- #
 # Contour Head
@@ -79,15 +79,31 @@ _C.MODEL.SEMANTIC_INSTANCE_HEAD.IGNORE_VALUE = 255
 # Contour Net Meta Arch
 # ---------------------------------------------------------------------------- #
 _C.MODEL.CONTOUR_NET = CN()
-_C.MODEL.CONTOUR_NET.ARCH = "dual_heads"
-# dual_decoders, dual_blocks, dual_heads, single_head
+# dual_blocks, dual_heads, single_head
+_C.MODEL.CONTOUR_NET.ARCH = "seperate_heads"
+_C.MODEL.CONTOUR_NET.LOSS_COMBINATION = 'fixed'  # uncertainty
+
+# options when generating the instances from segmentation and contours
+_C.MODEL.CONTOUR_NET.POSTPROC = CN()
+_C.MODEL.CONTOUR_NET.POSTPROC.CONTOUR_CONF_THRESH = 0.5
+_C.MODEL.CONTOUR_NET.POSTPROC.MIN_PIX_AREA = 50  # scaled with postproc_in_stride
+_C.MODEL.CONTOUR_NET.POSTPROC.OUTPUT_HEIGHT = 1024
+_C.MODEL.CONTOUR_NET.POSTPROC.OUTPUT_WIDTH = 2048
+
+# options when refining the instances using center regression
+_C.MODEL.CONTOUR_NET.REFINE = CN({"ENABLED": True})
+_C.MODEL.CONTOUR_NET.REFINE.SPLIT_EPS = 8
+_C.MODEL.CONTOUR_NET.REFINE.SPLIT_MIN_SAMPLES = 20
+_C.MODEL.CONTOUR_NET.REFINE.SPLIT_SAMPLE_SIZE_RATIO = 0.25
+_C.MODEL.CONTOUR_NET.REFINE.SPLIT_SAMPLE_MAX_SIZE = 20000
+_C.MODEL.CONTOUR_NET.REFINE.MERGE_EPS = 10
+_C.MODEL.CONTOUR_NET.REFINE.MERGE_MIN_SAMPLES = 1
 
 # options when combining instance & semantic segmentation outputs
 _C.MODEL.CONTOUR_NET.COMBINE = CN({"ENABLED": True})
 _C.MODEL.CONTOUR_NET.COMBINE.OVERLAP_THRESH = 0.5
 _C.MODEL.CONTOUR_NET.COMBINE.STUFF_AREA_LIMIT = 4096
 _C.MODEL.CONTOUR_NET.COMBINE.INSTANCES_CONFIDENCE_THRESH = 0.5
-_C.MODEL.CONTOUR_NET.LOSS_COMBINATION = 'fixed'  # uncertainty
 
 
 def get_cfg():

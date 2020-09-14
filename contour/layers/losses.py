@@ -1,7 +1,9 @@
 """Loss functions package."""
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from robust_loss_pytorch import AdaptiveLossFunction
 
 
 class WeightedMultiClassBinaryCrossEntropy(nn.Module):
@@ -27,17 +29,17 @@ class WeightedMultiClassBinaryCrossEntropy(nn.Module):
         num_classes = _target.shape[1]
         for i in range(num_classes):
             loss = self.bce(_input[:, i, ...], _target[:, i, ...])
-            mean_bce += loss['loss_hed_bce']
-        loss_dict = {'loss_hed_bce': mean_bce}
+            mean_bce += loss['loss_contour_bce']
+        loss_dict = {'loss_contour_bce': mean_bce}
         if self.huber_active:
-            mean_l1 += loss['loss_hed_huber']
-            loss_dict.update({'loss_hed_huber':  mean_l1})
-        if self.inverse_dice:
-            mean_inv_dice += loss['loss_hed_inv_dice']
-            loss_dict.update({'loss_hed_inv_dice':  0.1*mean_inv_dice})
-            loss_dict.update({'loss_hed_bce':  50*mean_bce})
-        if self.inverse_dice and self.huber_active:
-            loss_dict.update({'loss_hed_huber':  50*mean_l1})
+            mean_l1 += loss['loss_contour_huber']
+            loss_dict.update({'loss_contour_huber':  mean_l1})
+        elif self.inverse_dice:
+            mean_inv_dice += loss['loss_contour_inv_dice']
+            loss_dict.update({'loss_contour_inv_dice':  0.1*mean_inv_dice})
+            loss_dict.update({'loss_contour_bce':  50*mean_bce})
+        elif self.inverse_dice and self.huber_active:
+            loss_dict.update({'loss_contour_huber':  50*mean_l1})
         return loss_dict
 
 
@@ -60,19 +62,19 @@ class WeightedBinaryCrossEntropy(nn.Module):
                                                       weight=mask,
                                                       reduction='mean')
         mean_bce += bce_loss
-        loss_dict = {'loss_hed_bce': mean_bce}
+        loss_dict = {'loss_contour_bce': mean_bce}
         assert _input.squeeze().size() == _target.squeeze().size()
         if self.huber_active:
             # pylint: disable=no-member
             l1_loss = huber_loss(torch.sigmoid(_input.squeeze()),
                                  _target.squeeze(), delta=0.3)
             mean_l1 += l1_loss
-            loss_dict.update({'loss_hed_huber':  mean_l1})
+            loss_dict.update({'loss_contour_huber':  mean_l1})
         if self.inverse_dice:
             # pylint: disable=no-member
             mean_inv_dice += inv_dice_loss(torch.sigmoid(_input.squeeze()),
                                            _target)
-            loss_dict.update({'loss_hed_inv_dice':  mean_inv_dice})
+            loss_dict.update({'loss_contour_inv_dice':  mean_inv_dice})
         return loss_dict
 
 
@@ -187,6 +189,30 @@ class HuberLoss(nn.Module):
         if weight is not None:
             loss = loss * weight.unsqueeze(1)
         return loss.mean()
+
+
+class AdaptiveLoss(nn.Module):
+    """General and Adaptive Robust Loss Function.
+
+    Refer to https://arxiv.org/pdf/1701.03077.pdf    
+    """
+
+    def __init__(self, num_dims=1, float_dtype=np.float32, device='cuda'):
+        super().__init__()
+        self.adaptive = AdaptiveLossFunction(num_dims, float_dtype, device)
+
+    # pylint: disable=arguments-differ
+    def forward(self, _input, _target, weight=None):
+        if _input.size() != _target.size():
+            _input = _input.permute(0, 2, 3, 1).squeeze()
+        # pylint: disable=no-member
+        abs_diff = torch.abs(_input - _target)
+        if weight is not None:
+            abs_diff = abs_diff * weight.unsqueeze(1)
+        # pylint: disable=no-member
+        abs_diff = torch.flatten(abs_diff)
+        loss = torch.mean(self.adaptive.lossfun(abs_diff[:, None]))
+        return loss
 
 
 def huber_loss(_input, _target, weight=None, delta=0.5):

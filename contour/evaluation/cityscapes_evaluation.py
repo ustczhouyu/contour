@@ -173,8 +173,7 @@ class CityscapesSemSegEvaluator(CityscapesEvaluator):
             pred_filename = os.path.join(
                 self._temp_dir, basename + "_pred.png")
 
-            output = _output["sem_seg"].argmax(
-                dim=0).to(self._cpu_device).numpy()
+            output = _output["sem_seg"]
             pred = 255 * np.ones(output.shape, dtype=np.uint8)
             for train_id, label in trainId2label.items():
                 if label.ignoreInEval:

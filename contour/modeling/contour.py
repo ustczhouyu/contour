@@ -10,7 +10,7 @@ from torch import nn
 
 # pylint: disable=relative-beyond-top-level
 from ..data.builtin import MetadataCatalog
-from .postprocessing import contour_postprocess
+from .postprocessing import ContourNetPostProcessor
 from .utils import (build_center_reg_head, build_contour_head, build_fpn,
                     build_fpn_block, build_hed_decoder, build_sem_seg_head,
                     get_gt)
@@ -56,18 +56,13 @@ class ContourNet(nn.Module):
         self.loss_combination = cfg.MODEL.CONTOUR_NET.LOSS_COMBINATION
         self._build_contour_net(cfg)
         self.sigma = None
+        self.network_output = {}
 
-        # Post Process
-        self.combine_on = cfg.MODEL.CONTOUR_NET.COMBINE.ENABLED
-        self.combine_overlap_threshold = \
-            cfg.MODEL.CONTOUR_NET.COMBINE.OVERLAP_THRESH
-        self.combine_stuff_area_limit = \
-            cfg.MODEL.CONTOUR_NET.COMBINE.STUFF_AREA_LIMIT
-        self.combine_instances_confidence_threshold = \
-            cfg.MODEL.CONTOUR_NET.COMBINE.INSTANCES_CONFIDENCE_THRESH
+        # Postprocess
+        self.post_processor = ContourNetPostProcessor(cfg)
 
     def _build_contour_net(self, cfg):
-        if self.arch == 'dual_decoders':
+        if self.arch == 'seperate_decoders':
             self.fpn_block = build_fpn_block(cfg, self.fpn.output_shape())
             self.sem_seg_head = build_sem_seg_head(
                 cfg, self.fpn_block.output_shape())
@@ -76,9 +71,11 @@ class ContourNet(nn.Module):
             self.hed_decoder = build_hed_decoder(
                 cfg, self.backbone.output_shape())
 
-        elif self.arch == "dual_blocks":
+        elif self.arch == "seperate_blocks":
             self.fpn_block_seg = build_fpn_block(cfg, self.fpn.output_shape())
             self.fpn_block_contour = build_fpn_block(
+                cfg, self.fpn.output_shape())
+            self.fpn_block_center_reg = build_fpn_block(
                 cfg, self.fpn.output_shape())
             self.sem_seg_head = build_sem_seg_head(
                 cfg, self.fpn_block_seg.output_shape())
@@ -87,7 +84,7 @@ class ContourNet(nn.Module):
             self.center_reg_head = build_center_reg_head(
                 cfg, self.fpn_block_seg.output_shape())
 
-        elif self.arch == "dual_heads":
+        elif self.arch == "seperate_heads":
             self.fpn_block = build_fpn_block(cfg, self.fpn.output_shape())
             self.sem_seg_head = build_sem_seg_head(
                 cfg, self.fpn_block.output_shape())
@@ -112,6 +109,13 @@ class ContourNet(nn.Module):
         """Get device."""
         return self.pixel_mean.device
 
+    def _get_processed_gt(self, gt_raw, pad_value=0.0):
+        """Get processed Ground Truth"""
+        gt = ImageList.from_tensors(
+            gt_raw, self.backbone.size_divisibility, pad_value).tensor
+        gt.to(self.device)
+        return gt
+
     # pylint: disable=arguments-differ, too-many-locals
     def forward(self, batched_inputs):
         """
@@ -130,128 +134,82 @@ class ContourNet(nn.Module):
         """
         images = [x["image"].to(self.device) for x in batched_inputs]
         images = [(x - self.pixel_mean) / self.pixel_std for x in images]
-        images = ImageList.from_tensors(images,
-                                        self.backbone.size_divisibility)
-        if "sem_seg" in batched_inputs[0]:
-            gt_sem_seg = [x["sem_seg"].to(self.device) for x in batched_inputs]
-            gt_sem_seg = ImageList.from_tensors(
-                gt_sem_seg, self.backbone.size_divisibility,
-                255).tensor
-        else:
-            gt_sem_seg = None
+        images = ImageList.from_tensors(
+            images, self.backbone.size_divisibility)
 
-        if "instances" in batched_inputs[0]:
-            gt_instances = [x["instances"].to(
-                self.device) for x in batched_inputs]
-            gt_contours_raw, gt_offsets_raw = get_gt(gt_instances,
-                                                     images.image_sizes,
-                                                     self.contour_classes)
-            gt_contours = ImageList.from_tensors(gt_contours_raw,
-                                                 self.backbone.size_divisibility).tensor
-            gt_contours = gt_contours.to(self.device)
-            gt_offsets = ImageList.from_tensors(gt_offsets_raw,
-                                                self.backbone.size_divisibility).tensor
-            gt_offsets = gt_offsets.to(self.device)
+        if "sem_seg" in batched_inputs[0] and "instances" in batched_inputs[0]:
+            gt_sem_seg_raw = [x["sem_seg"] for x in batched_inputs]
+            gt_sem_seg = self._get_processed_gt(gt_sem_seg_raw, 255)
+
+            gt_instances = [x["instances"] for x in batched_inputs]
+            gt_contours_raw, gt_offsets_raw = get_gt(
+                gt_instances, images.image_sizes, self.contour_classes)
+            gt_contours = self._get_processed_gt(gt_contours_raw)
+            gt_offsets = self._get_processed_gt(gt_offsets_raw)
+
+            gt = {
+                "raw": {
+                    "sem_seg": gt_sem_seg_raw,
+                    "contours": gt_contours_raw,
+                    "offsets": gt_offsets_raw
+                },
+                "processed": {
+                    "sem_seg": gt_sem_seg,
+                    "contours": gt_contours,
+                    "offsets": gt_offsets,
+                    "instances": gt_instances
+                }
+            }
         else:
-            gt_instances, gt_contours, gt_offsets = None, None, None
+            gt = {
+                "processed": {
+                    "sem_seg": None,
+                    "contours": None,
+                    "offsets": None,
+                    "instances": None
+                }
+            }
 
         features = self.backbone(images.tensor)
-        (sem_seg_results, sem_seg_losses, contour_results,
-         contour_losses, center_reg_results, center_reg_losses) = \
-            self._forward_contour_net(
-                features, gt_sem_seg, gt_contours, gt_offsets)
+        network_output = self._forward_contour_net(features, gt["processed"])
 
         if self.training:
-            losses = self.update_losses(
-                sem_seg_losses, contour_losses, center_reg_losses)
+            losses = self._update_losses(network_output)
             if self.vis_period > 0:
                 storage = get_event_storage()
                 if (storage.iter % self.vis_period == 0) and storage.iter >= 1000:
-                    results = self.postprocess(images, sem_seg_results, contour_results,
-                                               center_reg_results)
-                    self.visualize_results(
+                    results = self.post_processor.post_process_batch(
+                        network_output['results'], images.image_sizes)
+                    self._visualize_results(
                         batched_inputs, results, gt_contours_raw, gt_offsets_raw)
             return losses
 
-        return self.postprocess(images, sem_seg_results, contour_results,
-                                center_reg_results)
+        return self.post_processor.post_process_batch(network_output['results'], images.image_sizes)
 
-    def update_losses(self, sem_seg_losses, contour_losses, center_reg_losses):
-        """Update losses."""
-        losses = {}
-        losses.update(sem_seg_losses)
-        if contour_losses is not None:
-            losses.update(contour_losses)
-        if center_reg_losses is not None:
-            losses.update(center_reg_losses)
-        storage = get_event_storage()
-        if (self.loss_combination == 'uncertainty') and (storage.iter >= 500):
-            self.sigma = self.sigma.cuda()
-            loss_keys = list(losses.keys())
-            for i, k in enumerate(loss_keys):
-                loss_k = losses[k].cuda()
-                if k in ['loss_sem_seg', 'loss_hed_bce', 'loss_contour']:
-                    if loss_k == 0.0:
-                        continue
-                    # pylint: disable=no-member
-                    losses[k] = (torch.exp(-self.sigma[i])
-                                 * loss_k + 0.5*self.sigma[i])
-                elif k in ['loss_hed_huber', 'loss_center_reg']:
-                    # pylint: disable=no-member
-                    losses[k] = 0.5 * (torch.exp(-self.sigma[i])
-                                       * loss_k + self.sigma[i])
-                else:
-                    raise ValueError('Unkown loss term {}'.format(k))
-        return losses
-
-    # pylint: disable=too-many-arguments
-    def postprocess(self, images, sem_seg_results,
-                    contour_results, center_reg_results):
-        """Perform postprocess."""
-        processed_results = []
-        for sem_seg_result, contour_result, center_reg_result, image_size in zip(
-                sem_seg_results, contour_results, center_reg_results, images.image_sizes):
-            height, width = image_size
-            sem_seg_r = sem_seg_postprocess(
-                sem_seg_result, image_size, height, width)
-            instances, contours, offsets = contour_postprocess(
-                sem_seg_result, contour_result, center_reg_result,
-                image_size, height, width, self.contour_classes)
-            processed_results.append({"sem_seg": sem_seg_r,
-                                      "instances": instances,
-                                      "contours": contours,
-                                      "offsets": offsets})
-
-            if self.combine_on:
-                panoptic_r = combine_semantic_and_instance_outputs(
-                    instances,
-                    sem_seg_r.argmax(dim=0),
-                    self.combine_overlap_threshold,
-                    self.combine_stuff_area_limit,
-                )
-                processed_results[-1]["panoptic_seg"] = panoptic_r
-        return processed_results
-
-    def _forward_contour_net(self, features, gt_sem_seg, gt_contours, gt_offsets):
+    def _forward_contour_net(self, features, gt):
         """Forward helper function."""
-        if self.arch == 'dual_decoders':
+        gt_sem_seg, gt_contours, gt_offsets = gt["sem_seg"], gt["contours"], gt["offsets"]
+        if self.arch == 'seperate_decoders':
             fpn_features = self.fpn_block(self.fpn(features))
+            # TODO: Fix this.
             sem_seg_results, sem_seg_losses = self.sem_seg_head(
                 fpn_features, gt_sem_seg)
             center_reg_results, center_reg_losses = self.center_reg_head(
                 fpn_features, gt_offsets)
             contour_results, contour_losses = self.hed_decoder(
                 features, gt_contours)
-        elif self.arch == "dual_blocks":
+        elif self.arch == "seperate_blocks":
             seg_fpn_features = self.fpn_block_seg(self.fpn(features))
             contour_fpn_features = self.fpn_block_contour(self.fpn(features))
+            center_reg_fpn_features = self.fpn_block_center_reg(
+                self.fpn(features))
             sem_seg_results, sem_seg_losses = self.sem_seg_head(
                 seg_fpn_features, gt_sem_seg)
-            center_reg_results, center_reg_losses = self.center_reg_head(seg_fpn_features,
-                                                                         gt_offsets)
+            center_reg_results, center_reg_losses = self.center_reg_head(
+                seg_fpn_features, gt_offsets)
             contour_results, contour_losses = self.contour_head(
                 contour_fpn_features, gt_contours)
-        elif self.arch == "dual_heads":
+        elif self.arch == "seperate_heads":
             fpn_features = self.fpn_block(self.fpn(features))
             sem_seg_results, sem_seg_losses = self.sem_seg_head(
                 fpn_features, gt_sem_seg)
@@ -262,10 +220,46 @@ class ContourNet(nn.Module):
         else:
             raise ValueError('Unkown architecture for Contour Net.')
 
-        return (sem_seg_results, sem_seg_losses, contour_results, contour_losses,
-                center_reg_results, center_reg_losses)
+        network_output = {
+            "results": {
+                "sem_seg": sem_seg_results,
+                "contours": contour_results,
+                "offsets": center_reg_results
+            },
+            "losses": {
+                "sem_seg": sem_seg_losses,
+                "contours": contour_losses,
+                "offsets": center_reg_losses
+            },
+        }
+        return network_output
 
-    def visualize_results(self, batched_inputs, results, gt_contours, gt_offsets):
+    def _update_losses(self, network_output):
+        """Update losses."""
+        losses = {}
+        for loss in network_output["losses"].values():
+            losses.update(loss)
+        storage = get_event_storage()
+        if (self.loss_combination == 'uncertainty') and (storage.iter >= 500):
+            self.sigma = self.sigma.cuda()
+            loss_keys = list(losses.keys())
+            for i, k in enumerate(loss_keys):
+                loss_k = losses[k].cuda()
+                if k in ['loss_sem_seg', 'loss_contour_bce', 'loss_contour']:
+                    if loss_k == 0.0:
+                        continue
+                    # pylint: disable=no-member
+                    losses[k] = (torch.exp(-self.sigma[i])
+                                 * loss_k + 0.5*self.sigma[i])
+                elif k in ['loss_contour_huber', 'loss_center_reg']:
+                    # pylint: disable=no-member
+                    losses[k] = 0.5 * (torch.exp(-self.sigma[i])
+                                       * loss_k + self.sigma[i])
+                else:
+                    raise ValueError('Unkown loss term {}'.format(k))
+        return losses
+
+    def _visualize_results(self, batched_inputs, results, gt_contours, gt_offsets):
         """
         A function used to visualize ground truth images and final network predictions.
 
@@ -320,7 +314,8 @@ class ContourNet(nn.Module):
         cont_gt = cont_gt.draw_contours(gt_contours[image_index].cpu())
         cont_gt = cont_gt.get_image()
         cont_pred = Visualizer(img, self.metadata)
-        cont_pred = cont_pred.draw_contours(results[image_index]["contours"].detach().cpu())
+        cont_pred = cont_pred.draw_contours(
+            results[image_index]["contours"].detach().cpu())
         cont_pred = cont_pred.get_image()
         cont_img = np.vstack((cont_gt, cont_pred))
         cont_img = cont_img.transpose(2, 0, 1)
@@ -332,90 +327,10 @@ class ContourNet(nn.Module):
             gt_offsets[image_index][:2, :, :].cpu())
         offset_gt = offset_gt.get_image()
         offset_pred = Visualizer(img, None)
-        offset_pred = offset_pred.draw_offsets(results[image_index]["offsets"].detach().cpu())
+        offset_pred = offset_pred.draw_offsets(
+            results[image_index]["offsets"].detach().cpu())
         offset_pred = offset_pred.get_image()
         offset_img = np.vstack((offset_gt, offset_pred))
         offset_img = offset_img.transpose(2, 0, 1)
         offset_name = "Top: GT Offsets; Bottom: Predicted Offsets"
         storage.put_image(offset_name, offset_img)
-
-
-# pylint: disable=too-many-locals
-def combine_semantic_and_instance_outputs(
-    instance_results,
-    semantic_results,
-    overlap_threshold,
-    stuff_area_limit,
-):
-    """
-    Implement a simple combining logic following
-    "combine_semantic_and_instance_predictions.py" in panopticapi
-    to produce panoptic segmentation outputs.
-
-    Args:
-        instance_results: output of :func:`detector_postprocess`.
-        semantic_results: an (H, W) tensor, each is the contiguous semantic
-            category id
-
-    Returns:
-        panoptic_seg (Tensor): of shape (height, width) where the values are ids for each segment.
-        segments_info (list[dict]): Describe each segment in `panoptic_seg`.
-            Each dict contains keys "id", "category_id", "isthing".
-    """
-    # pylint: disable=no-member
-    panoptic_seg = torch.zeros_like(semantic_results, dtype=torch.int32)
-    current_segment_id = 0
-    segments_info = []
-    # pylint: disable=no-member
-    instance_masks = instance_results.pred_masks.to(
-        dtype=torch.bool, device=panoptic_seg.device)
-    # Add instances one-by-one, check for overlaps with existing ones
-    for inst_id in range(len(instance_results)):
-        mask = instance_masks[inst_id]  # H,W
-        mask_area = mask.sum().item()
-
-        if mask_area == 0:
-            continue
-
-        intersect = (mask > 0) & (panoptic_seg > 0)
-        intersect_area = intersect.sum().item()
-
-        if intersect_area * 1.0 / mask_area > overlap_threshold:
-            continue
-
-        if intersect_area > 0:
-            mask = mask & (panoptic_seg == 0)
-
-        current_segment_id += 1
-        panoptic_seg[mask] = current_segment_id
-        segments_info.append(
-            {
-                "id": current_segment_id,
-                "isthing": True,
-                "category_id": instance_results.pred_classes[inst_id].item(),
-                "instance_id": inst_id,
-            }
-        )
-
-    # Add semantic results to remaining empty areas
-    semantic_labels = torch.unique(semantic_results).cpu().tolist()
-    for semantic_label in semantic_labels:
-        if semantic_label == 0:  # 0 is a special "thing" class
-            continue
-        mask = (semantic_results == semantic_label) & (panoptic_seg == 0)
-        mask_area = mask.sum().item()
-        if mask_area < stuff_area_limit:
-            continue
-
-        current_segment_id += 1
-        panoptic_seg[mask] = current_segment_id
-        segments_info.append(
-            {
-                "id": current_segment_id,
-                "isthing": False,
-                "category_id": semantic_label,
-                "area": mask_area,
-            }
-        )
-
-    return panoptic_seg, segments_info

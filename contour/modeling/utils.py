@@ -508,7 +508,7 @@ class CenterRegHead(nn.Module):
         """Compute loss."""
         out = F.interpolate(predictions, size=targets.size()[-2:],
                             mode="bilinear", align_corners=True)
-        loss = HuberLoss()(out, targets[:, :2, :, :], targets[:, 2, :, :])
+        loss = HuberLoss(delta=1.0)(out, targets[:, :2, :, :], targets[:, 2, :, :])
         losses = {"loss_center_reg": loss * self.loss_weight}
         return losses
 
@@ -706,7 +706,7 @@ def get_gt(instances, image_sizes, num_classes):
             g_w, g_h = np.meshgrid(np.arange(width), np.arange(height))
             x_s, y_s = np.nonzero(bit_mask_cropped)
             c_x, c_y = np.mean(x_s), np.mean(y_s)
-            weight = 100/((np.min((np.sum(bit_mask_cropped), 99))+1))
+            weight = 1000/((np.min((np.sum(bit_mask_cropped), 999))+1))
             offset_cropped[0] = (g_h - c_x)*bit_mask_cropped
             offset_cropped[1] = (g_w - c_y)*bit_mask_cropped
             offset_cropped[2] = weight*bit_mask_cropped

@@ -2,7 +2,7 @@ _BASE_: "Base-Panoptic-Contour.yaml"
 MODEL:
   WEIGHTS: "detectron2://ImageNetPretrained/MSRA/R-50.pkl"
   CONTOUR_HEAD:
-    LOSS_WEIGHT: 10.0
+    LOSS_WEIGHT: 50.0
   RESNETS:
     DEPTH: 50
 OUTPUT_DIR: "output/cityscapes_panoptic_contour_binary_seperate_R_50_1x"

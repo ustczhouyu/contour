@@ -3,6 +3,7 @@ import cv2
 import numpy as np
 import torch
 from detectron2.utils.visualizer import Visualizer
+from detectron2.utils.video_visualizer import VideoVisualizer as DetectronVideoVisualizer
 
 
 class ImageVisualizer(Visualizer):
@@ -117,3 +118,8 @@ def rgb_from_gt_contours(gt_data, metadata=None):
     rgb[:, :, 1] = _g/255.0
     rgb[:, :, 2] = _b/255.0
     return rgb
+
+
+class VideoVisualizer(DetectronVideoVisualizer):
+    """Video Visualizer with support to draw contours and offsets."""
+    pass
