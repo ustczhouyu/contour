@@ -121,7 +121,7 @@ class ContourNetPostProcessor:
             inst = self.refine_instances(inst, result['offsets'])
             # Crop hood pixels and remove edge pixels over width.
             inst[1000:, :] = 0
-            inst[:, :] = 0
+            inst[:, :5] = 0
             inst[:, -5:] = 0
         # pylint: disable=no-member
         return torch.from_numpy(inst).squeeze()
