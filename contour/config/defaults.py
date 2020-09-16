@@ -49,7 +49,7 @@ _C.MODEL.SEM_SEG_HEAD.IGNORE_VALUE = 255
 # ---------------------------------------------------------------------------- #
 _C.MODEL.CENTER_REG_HEAD = CN()
 _C.MODEL.CENTER_REG_HEAD.NAME = "CenterRegHead"
-_C.MODEL.CENTER_REG_HEAD.LOSS_WEIGHT = 0.25
+_C.MODEL.CENTER_REG_HEAD.LOSS_WEIGHT = 0.1
 
 # ---------------------------------------------------------------------------- #
 # Contour Head
@@ -58,8 +58,8 @@ _C.MODEL.CONTOUR_HEAD = CN()
 _C.MODEL.CONTOUR_HEAD.NAME = "ContourHead"
 _C.MODEL.CONTOUR_HEAD.LOSS_WEIGHT = 1.0
 _C.MODEL.CONTOUR_HEAD.NUM_CLASSES = 1  # 9  # (8 Stuff + 1 background)
-_C.MODEL.CONTOUR_HEAD.HUBER_ACTIVE = True
-_C.MODEL.CONTOUR_HEAD.DICE_ACTIVE = False
+_C.MODEL.CONTOUR_HEAD.HUBER_ACTIVE = False
+_C.MODEL.CONTOUR_HEAD.STEAL_ACTIVE = False
 
 # ---------------------------------------------------------------------------- #
 # Semantic with Instance Head

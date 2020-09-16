@@ -13,7 +13,7 @@ from detectron2.utils.visualizer import ColorMode, Visualizer
 
 
 class VisualizationDemo(object):
-    def __init__(self, cfg, instance_mode=ColorMode.IMAGE_BW, parallel=True):
+    def __init__(self, cfg, instance_mode=ColorMode.IMAGE, parallel=True):
         """
         Args:
             cfg (CfgNode):

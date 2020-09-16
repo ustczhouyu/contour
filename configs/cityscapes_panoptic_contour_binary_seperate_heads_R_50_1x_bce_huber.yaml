@@ -2,8 +2,8 @@ _BASE_: "Base-Panoptic-Contour.yaml"
 MODEL:
   WEIGHTS: "detectron2://ImageNetPretrained/MSRA/R-50.pkl"
   CONTOUR_HEAD:
-    HUBER_ACTIVE: "False"
-    DICE_ACTIVE: "True"
+    LOSS_WEIGHT: 50.0
+    HUBER_ACTIVE: "True"
   RESNETS:
     DEPTH: 50
-OUTPUT_DIR: "output/cityscapes_panoptic_contour_binary_seperate_R_50_1x_bce_dice"
+OUTPUT_DIR: "output/cityscapes_panoptic_contour_binary_seperate_heads_R_50_1x_bce_huber"

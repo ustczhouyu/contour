@@ -14,9 +14,8 @@ from torch import nn
 from torch.autograd import Variable
 from torch.nn import functional as F
 
-# pylint: disable=relative-beyond-top-level
-from ..layers.losses import (HuberLoss, WeightedBinaryCrossEntropy,
-                             WeightedMultiClassBinaryCrossEntropy)
+from .losses import HuberLoss, WeightedMultiClassBinaryCrossEntropy
+from .steal import StealLoss
 
 __all__ = ["FPNBlock", "build_fpn_block", "HedDecoder", "build_hed_decoder",
            "SemSegHead", "build_sem_seg_head", 'build_contour_head',
@@ -295,12 +294,9 @@ class HedDecoder(nn.Module):
             if self.res5_supervision:
                 res5 = F.interpolate(res5, size=targets.size()[-2:],
                                      mode="bilinear", align_corners=True)
-        if self.num_classes == 1:
-            loss_fn = WeightedBinaryCrossEntropy(self.huber_active,
-                                                 self.dice_active)
-        else:
-            loss_fn = WeightedMultiClassBinaryCrossEntropy(self.huber_active,
-                                                           self.dice_active)
+
+        loss_fn = WeightedMultiClassBinaryCrossEntropy(self.huber_active,
+                                                       self.dice_active)
         if self.res5_supervision:
             loss_fused = loss_fn(fused, targets.squeeze())
             loss_res5 = loss_fn(res5, targets.squeeze())
@@ -447,7 +443,7 @@ class ContourHead(nn.Module):
         num_classes = cfg.MODEL.CONTOUR_HEAD.NUM_CLASSES
         feature_channels = input_shape.channels
         self.huber_active = cfg.MODEL.CONTOUR_HEAD.HUBER_ACTIVE
-        self.dice_active = cfg.MODEL.CONTOUR_HEAD.DICE_ACTIVE
+        self.steal_active = cfg.MODEL.CONTOUR_HEAD.STEAL_ACTIVE
         self.loss_weight = cfg.MODEL.CONTOUR_HEAD.LOSS_WEIGHT
         self.predictor = Conv2d(feature_channels, num_classes,
                                 kernel_size=1, stride=1, padding=0)
@@ -470,10 +466,18 @@ class ContourHead(nn.Module):
         """Compute loss."""
         out = F.interpolate(predictions, size=targets.size()[-2:],
                             mode="bilinear", align_corners=True)
-        loss = WeightedMultiClassBinaryCrossEntropy(self.huber_active,
-                                                    self.dice_active)(out, targets)
-        losses = {k: v * self.loss_weight for k, v in loss.items()}
-        return losses
+        loss = WeightedMultiClassBinaryCrossEntropy()(out, targets)
+        loss["loss_contour_bce"] = self.loss_weight*loss["loss_contour_bce"]
+        if self.huber_active:
+            huber_loss_fn = HuberLoss(delta=0.3)
+            huber_loss = huber_loss_fn(torch.sigmoid(
+                out.squeeze()), targets.squeeze())
+            loss["loss_contour_huber"] = huber_loss
+
+        if self.steal_active:
+            loss.update(StealLoss()(torch.sigmoid(out), targets))
+
+        return loss
 
 
 @CENTER_REG_HEAD_REGISTRY.register()
@@ -508,7 +512,8 @@ class CenterRegHead(nn.Module):
         """Compute loss."""
         out = F.interpolate(predictions, size=targets.size()[-2:],
                             mode="bilinear", align_corners=True)
-        loss = HuberLoss(delta=1.0)(out, targets[:, :2, :, :], targets[:, 2, :, :])
+        loss = HuberLoss(delta=1.0)(
+            out, targets[:, :2, :, :], targets[:, 2, :, :])
         losses = {"loss_center_reg": loss * self.loss_weight}
         return losses
 
@@ -718,10 +723,10 @@ def get_gt(instances, image_sizes, num_classes):
                 continue
             if num_classes == 1:
                 contour_im[ymin:ymax, xmin:xmax] = cv2.drawContours(
-                    img[ymin:ymax, xmin:xmax], cnts, -1, 1, 2)
+                    img[ymin:ymax, xmin:xmax], cnts, -1, 1, thickness=1)
             else:
                 contour_im[label, ymin:ymax, xmin:xmax] = cv2.drawContours(
-                    img[ymin:ymax, xmin:xmax], cnts, -1, 1, 2)
+                    img[ymin:ymax, xmin:xmax], cnts, -1, 1, thickness=1)
 
             offset_im[:, ymin:ymax, xmin:xmax] += offset_cropped
         offset_im[2] += 0.5

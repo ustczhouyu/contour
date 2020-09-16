@@ -13,96 +13,39 @@ class WeightedMultiClassBinaryCrossEntropy(nn.Module):
     Refer to https://arxiv.org/pdf/1705.09759.pdf
     """
 
-    def __init__(self, huber_active=False, inverse_dice=False):
+    def __init__(self):
         super().__init__()
-        self.bce = WeightedBinaryCrossEntropy(huber_active, inverse_dice)
-        self.huber_active = huber_active
-        self.inverse_dice = inverse_dice
+        self.bce = WeightedBinaryCrossEntropy()
 
     # pylint: disable=arguments-differ
     def forward(self, _input, _target):
-        mean_l1 = 0.0
         mean_bce = 0.0
-        mean_inv_dice = 0.0
         if len(_target.shape) < 4:
             _target = _target.unsqueeze(1)
         num_classes = _target.shape[1]
         for i in range(num_classes):
-            loss = self.bce(_input[:, i, ...], _target[:, i, ...])
-            mean_bce += loss['loss_contour_bce']
+            bce_loss = self.bce(_input[:, i, ...], _target[:, i, ...])
+            mean_bce += bce_loss
         loss_dict = {'loss_contour_bce': mean_bce}
-        if self.huber_active:
-            mean_l1 += loss['loss_contour_huber']
-            loss_dict.update({'loss_contour_huber':  mean_l1})
-        elif self.inverse_dice:
-            mean_inv_dice += loss['loss_contour_inv_dice']
-            loss_dict.update({'loss_contour_inv_dice':  0.1*mean_inv_dice})
-            loss_dict.update({'loss_contour_bce':  50*mean_bce})
-        elif self.inverse_dice and self.huber_active:
-            loss_dict.update({'loss_contour_huber':  50*mean_l1})
         return loss_dict
 
 
 class WeightedBinaryCrossEntropy(nn.Module):
     """Weighted BCE."""
 
-    def __init__(self, huber_active=False, inverse_dice=False):
-        super().__init__()
-        self.huber_active = huber_active
-        self.inverse_dice = inverse_dice
-
     # pylint: disable=arguments-differ
     def forward(self, _input, _target):
-        mean_bce = 0.0
-        mean_l1 = 0.0
-        mean_inv_dice = 0.0
         mask = get_weight_mask(_target.float())
         bce_loss = F.binary_cross_entropy_with_logits(_input.squeeze().float(),
                                                       _target.float(),
                                                       weight=mask,
                                                       reduction='mean')
-        mean_bce += bce_loss
-        loss_dict = {'loss_contour_bce': mean_bce}
-        assert _input.squeeze().size() == _target.squeeze().size()
-        if self.huber_active:
-            # pylint: disable=no-member
-            l1_loss = huber_loss(torch.sigmoid(_input.squeeze()),
-                                 _target.squeeze(), delta=0.3)
-            mean_l1 += l1_loss
-            loss_dict.update({'loss_contour_huber':  mean_l1})
-        if self.inverse_dice:
-            # pylint: disable=no-member
-            mean_inv_dice += inv_dice_loss(torch.sigmoid(_input.squeeze()),
-                                           _target)
-            loss_dict.update({'loss_contour_inv_dice':  mean_inv_dice})
-        return loss_dict
+        return bce_loss
 
 
-class FocalLoss(nn.Module):
-    """Focal Loss. Refer to https://arxiv.org/abs/1708.02002."""
-
-    def __init__(self, ignore_index=255, gamma=1):
-        super().__init__()
-        self.ignore_index = ignore_index
-        self.gamma = gamma
-
-    # pylint: disable=arguments-differ
-    def forward(self, _input, _target):
-        _n, _c, _h, _w = _input.size()
-        _input, _target = flatten_data(_input, _target)
-        _target = _target.long()
-        ce_loss = F.cross_entropy(_input, _target, weight=None,
-                                  ignore_index=self.ignore_index.cuda(),
-                                  reduction='none')
-        loss = ((1 - F.softmax(_input, dim=1).permute(
-            0, 2, 3, 1).contiguous().view(-1, _c))**self.gamma).squeeze() * ce_loss
-        return loss.mean()
-
-
-class DualityCELoss(nn.Module):
+class DualityLoss(nn.Module):
     """Duality CE Loss for Semantic Segmentation.
 
-    Uses cross entropy and huber loss.
     Refer to https://arxiv.org/pdf/2004.07684.pdf"""
 
     def __init__(self, weights=None, ignore_index=255):
@@ -117,56 +60,9 @@ class DualityCELoss(nn.Module):
         ce_loss = F.cross_entropy(_input, _target, weight=self.weights.cuda(),
                                   ignore_index=self.ignore_index)
         # pylint:disable=no-member
-        smooth_l1_loss = huber_loss((torch.argmax(_input, dim=1) == _input.size(1)).float(),
-                                    (_target == 19).float(), delta=0.3)
-        return ce_loss + 50*smooth_l1_loss
+        loss_dict = {'loss_sem_seg': ce_loss}
 
-
-class DualityFocalLoss(nn.Module):
-    """Duality focal Loss for Semantic Segmentation.
-
-    Uses cross entropy, focal and huber loss.
-    Refer to https://arxiv.org/pdf/2004.07684.pdf"""
-
-    def __init__(self, ignore_index=255, gamma=1):
-        super().__init__()
-        self.ignore_index = ignore_index
-        self.gamma = gamma
-
-    # pylint: disable=arguments-differ
-    def forward(self, _input, _target):
-        _n, _c, _h, _w = _input.size()
-        _input, _target = flatten_data(_input, _target)
-        _target = _target.long()
-        ce_loss = F.cross_entropy(_input, _target,
-                                  weight=None,
-                                  ignore_index=self.ignore_index,
-                                  reduction='none')
-        loss = ((1 - F.softmax(_input, dim=1).permute(
-            0, 2, 3, 1).contiguous().view(-1, _c))**self.gamma).squeeze() * ce_loss
-        # pylint: disable=no-member
-        smooth_l1_loss = huber_loss((torch.argmax(_input, dim=1) == _input.size(1)).float(),
-                                    (_target == _input.size(1)).float(),
-                                    delta=0.3)
-        return loss.mean() + 50*smooth_l1_loss
-
-
-class BboxLoss(nn.Module):
-    """Loss module for bounding boxes.
-
-    Computes classification and offsets regression loss."""
-
-    # pylint: disable=arguments-differ
-    def forward(self, _input, _target, weight):
-        loss = 0.0
-        if isinstance(_input['class'], dict):
-            for key, value in _input['class'].items():
-                logits = {'class': value, 'offsets': _input['offsets'][key]}
-                loss += key*bbox_loss_level(logits, _target, weight, key)
-        else:
-            loss = bbox_loss_level(_input, _target, weight)
-
-        return loss
+        return loss_dict
 
 
 class HuberLoss(nn.Module):

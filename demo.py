@@ -109,7 +109,7 @@ if __name__ == "__main__":
         basename = os.path.basename(args.video_input)
 
         output_fname = os.path.join(out_dir, basename)
-        output_fname = os.path.splitext(output_fname)[0] + ".mp4"
+        output_fname = os.path.splitext(output_fname)[0] + ".mkv"
 
         assert not os.path.isfile(output_fname), output_fname
         output_file = cv2.VideoWriter(

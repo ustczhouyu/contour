@@ -74,7 +74,7 @@ class ContourNetPostProcessor:
         segm = raw_data["sem_seg"]
         offsets = raw_data["offsets"]
         contours = raw_data["contours"]
-        segm_r = segm.argmax(dim=0).detach().cpu().numpy()
+        segm_r = torch.argmax(segm, dim=0).detach().cpu().numpy()
         mask = (segm_r >= 11).astype(np.uint8)
         offsets = offsets.detach().cpu().numpy()
 
